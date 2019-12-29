@@ -608,6 +608,9 @@ class Blotter():
     @asynctools.multitasking.task
     def on_tick_received(self, tick):
         # data
+        self.log_blotter.info("In on_tick_received")
+        #self.log_blotter.info('counter : %s'%self.counter)
+
         symbol = tick['symbol']
         timestamp = datetime.strptime(tick['timestamp'],
                                       ibDataTypes["DATE_TIME_FORMAT_LONG_MILLISECS"])
@@ -629,50 +632,80 @@ class Blotter():
         if symbol not in self._bars:
             self._bars[symbol] = self._bars['~']
 
+
+        #self.log_blotter.info('symbol : %s'%symbol)
+
         # send tick to message self.broadcast
         tick["kind"] = "TICK"
         self.broadcast(tick, "TICK")
         self.log2db(tick, "TICK")
 
-        # add tick to raw self._bars
+        # add tick to self._raw_bars
         tick_data = pd.DataFrame(index=['timestamp'],
                                  data={'timestamp': timestamp,
                                        'last': tick['last'],
                                        'volume': tick['lastsize']})
         tick_data.set_index(['timestamp'], inplace=True)
         _raw_bars = self._raw_bars[symbol].copy()
-        _raw_bars = _raw_bars.append(tick_data)
+        _bars = self._bars[symbol].copy()
 
+        _raw_bars = _raw_bars.append(tick_data)
+        self.log_blotter.info(tick_data)
         # add tools.resampled raw to self._bars
+        self.log_blotter.info("_raw_bars")
+        self.log_blotter.info(_raw_bars)
+
+
+        self.log_blotter.info("_bars")
+        self.log_blotter.info(_bars)
+
         ohlc = _raw_bars['last'].resample('1T').ohlc()
-        vol = _raw_bars['volume'].resample('1T').sum()
         vol = _raw_bars['volume'].resample('1T').sum()
 
         opened_bar = ohlc
         opened_bar['volume'] = vol
 
-        # add bar to self._bars object
-        previous_bar_count = len(self._bars[symbol])
-        self._bars[symbol] = self._bars[symbol].append(opened_bar)
-        self._bars[symbol] = self._bars[symbol].groupby(
-            self._bars[symbol].index).last()
+        self.log_blotter.info("opened_bar")
+        self.log_blotter.info(opened_bar)
 
-        if len(self._bars[symbol].index) > previous_bar_count:
+        new_bar_count = len(opened_bar.index)
+        previous_bar_count =  len(_bars.index)
+        self.log_blotter.info(new_bar_count)
+        self.log_blotter.info(previous_bar_count)
 
-            bar = self._bars[symbol].to_dict(orient='records')[0]
+
+        if new_bar_count > previous_bar_count :
+            """
+            self._bars[symbol] = self._bars[symbol].groupby(
+                self._bars[symbol].index).last()
+            """
+
+            self.log_blotter.info("New bar")
+            bar = opened_bar.to_dict(orient='records')[0]
+
+            self.log_blotter.info(bar)
+
+            #bar['volume'] = len(self._raw_bars[symbol].index) -1
+
             bar["symbol"] = symbol
             bar["symbol_group"] = tick['symbol_group']
             bar["asset_class"] = tick['asset_class']
-            bar["timestamp"] = self._bars[symbol].index[0].strftime(
+            bar["timestamp"] = opened_bar.index[0].strftime(
                 ibDataTypes["DATE_TIME_FORMAT_LONG"])
 
+            self.log_blotter.info(bar)
             bar["kind"] = "BAR"
             self.broadcast(bar, "BAR")
             self.log2db(bar, "BAR")
 
-            self._bars[symbol] = self._bars[symbol][-1:]
-            _raw_bars.drop(_raw_bars.index[:], inplace=True)
+            self._bars[symbol] = opened_bar[-1:]
+            self._raw_bars[symbol] = tick_data
+
+        else :
+            self.log_blotter.info("bar in construction, append")
+            #update _bars
             self._raw_bars[symbol] = _raw_bars
+            self._bars[symbol] = opened_bar
 
     # -------------------------------------------
     def broadcast(self, data, kind):
