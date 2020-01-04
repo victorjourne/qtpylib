@@ -43,7 +43,7 @@ ALTER TABLE `symbols`
   MODIFY `symbol_group` varchar(18);
 
 
-CREATE TABLE IF NOT EXISTS `bars` (
+CREATE TABLE IF NOT EXISTS `bars_min` (
   `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
   `datetime` datetime NOT NULL,
   `symbol_id` int(11) unsigned NOT NULL,
@@ -56,7 +56,39 @@ CREATE TABLE IF NOT EXISTS `bars` (
   UNIQUE KEY `key` (`datetime`,`symbol_id`),
   KEY `datetime` (`datetime`),
   KEY `symbol_id` (`symbol_id`),
-  CONSTRAINT `bar_symbol` FOREIGN KEY (`symbol_id`) REFERENCES `symbols` (`id`)
+  CONSTRAINT `bar_min_symbol` FOREIGN KEY (`symbol_id`) REFERENCES `symbols` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `bars_hour` (
+  `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
+  `datetime` datetime NOT NULL,
+  `symbol_id` int(11) unsigned NOT NULL,
+  `open` double unsigned DEFAULT NULL,
+  `high` double unsigned DEFAULT NULL,
+  `low` double unsigned DEFAULT NULL,
+  `close` double unsigned DEFAULT NULL,
+  `volume` int(11) unsigned DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `key` (`datetime`,`symbol_id`),
+  KEY `datetime` (`datetime`),
+  KEY `symbol_id` (`symbol_id`),
+  CONSTRAINT `bar_hour_symbol` FOREIGN KEY (`symbol_id`) REFERENCES `symbols` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `bars_week` (
+  `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
+  `datetime` datetime NOT NULL,
+  `symbol_id` int(11) unsigned NOT NULL,
+  `open` double unsigned DEFAULT NULL,
+  `high` double unsigned DEFAULT NULL,
+  `low` double unsigned DEFAULT NULL,
+  `close` double unsigned DEFAULT NULL,
+  `volume` int(11) unsigned DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `key` (`datetime`,`symbol_id`),
+  KEY `datetime` (`datetime`),
+  KEY `symbol_id` (`symbol_id`),
+  CONSTRAINT `bar_week_symbol` FOREIGN KEY (`symbol_id`) REFERENCES `symbols` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
 
 

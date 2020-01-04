@@ -32,7 +32,7 @@ import time
 import glob
 import subprocess
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from abc import ABCMeta
 
 import zmq
@@ -120,14 +120,14 @@ class Blotter():
                  ibport=4001, ibclient=999, ibserver="localhost",
                  dbhost="localhost", dbport="3306", dbname="qtpy",
                  dbuser="root", dbpass="", dbskip=False, orderbook=False,
-                 zmqport="12345", zmqtopic=None, **kwargs):
+                 zmqport="12345", zmqtopic=None,barsize=1, **kwargs):
 
         # whats my name?
         self.name = str(self.__class__).split('.')[-1].split("'")[0].lower()
         if name is not None:
             self.name = name
 
-        # initilize class logger
+        # initilize class logge 2>&1r
         self.log_blotter = logging.getLogger(__name__)
 
         # do not act on first tick (timezone is incorrect)
@@ -140,10 +140,12 @@ class Blotter():
         # self._bars.index = self._bars.index.tz_convert(settings['timezone'])
         self._bars = {"~": self._bars}
 
-        self._raw_bars = pd.DataFrame(columns=['last', 'volume'])
+        self._raw_bars = pd.DataFrame(columns=['last', 'volume', 'symbol_group', 'asset_class'])
         self._raw_bars.index.names = ['datetime']
         self._raw_bars.index = pd.to_datetime(self._raw_bars.index, utc=True)
         self._raw_bars = {"~": self._raw_bars}
+
+
 
         # global objects
         self.dbcurr = None
@@ -172,6 +174,23 @@ class Blotter():
         ) if arg not in ('__class__', 'self', 'kwargs')}
         self.args.update(kwargs)
         self.args.update(self.load_cli_args())
+
+        # last_bar_datetime
+        self.last_bar_datetime = datetime.now()
+
+        if 'barsize' not in self.args:
+             self.barsize = barsize
+        else:
+            self.barsize = int(self.args['barsize'])
+
+        self.last_bar_datetime = self.last_bar_datetime + timedelta(minutes=self.barsize)
+        self.last_bar_datetime  = self.last_bar_datetime .replace(minute= (self.last_bar_datetime.minute // self.barsize) * self.barsize,
+                                       second = 0,
+                                       microsecond =0)
+
+        #self.last_bar_datetime = {"~":   self.last_bar_datetime}
+        print('Next valid bar at %s' % self.last_bar_datetime )
+
 
         # read cached args to detect duplicate blotters
         self.duplicate_run = False
@@ -235,10 +254,12 @@ class Blotter():
         try:
             # not sure how this works on windows...
             command = 'pgrep -f ' + sys.argv[0]
+            print(command)
             process = subprocess.Popen(
                 command, shell=True, stdout=subprocess.PIPE)
             stdout_list = process.communicate()[0].decode('utf-8').split("\n")
             stdout_list = list(filter(None, stdout_list))
+            print(sdout_list)
             return len(stdout_list) > 0
         except Exception as e:
             return False
@@ -304,6 +325,8 @@ class Blotter():
         parser.add_argument('--dbskip', default=self.args['dbskip'],
                             required=False, help='Skip MySQL logging (flag)',
                             action='store_true')
+        parser.add_argument('--barsize', default=1,
+                    required=False, help='Aggregation size of Bar (min)')
 
         # only return non-default cmd line args
         # (meaning only those actually given)
@@ -368,6 +391,7 @@ class Blotter():
                 pass
 
         else:
+
             data = {
                 "symbol": symbol,
                 "symbol_group": tools.gen_symbol_group(symbol),
@@ -498,8 +522,7 @@ class Blotter():
             if quote["asset_class"] == "CSH":
                 quote['last'] = round(
                     float((quote['bid'] + quote['ask']) / 2), 5)
-                quote['timestamp'] = datetime.utcnow(
-                ).strftime("%Y-%m-%d %H:%M:%S.%f")
+                quote['timestamp'] = time.locatime().strftime("%Y-%m-%d %H:%M:%S.%f")
 
                 # create synthetic tick
                 if symbol in self.cash_ticks.keys() and quote['last'] != self.cash_ticks[symbol]:
@@ -572,7 +595,7 @@ class Blotter():
         # assign timestamp
         tick['timestamp'] = self.ibConn.optionsData[tickerId].index[0]
         if tick['timestamp'] == 0:
-            tick['timestamp'] = datetime.utcnow().strftime(
+            tick['timestamp'] = time.localtime().strftime(
                 ibDataTypes['DATE_TIME_FORMAT_LONG_MILLISECS'])
 
         # treat as tick if last/volume changed
@@ -608,10 +631,11 @@ class Blotter():
     @asynctools.multitasking.task
     def on_tick_received(self, tick):
         # data
-        self.log_blotter.info("In on_tick_received")
         #self.log_blotter.info('counter : %s'%self.counter)
 
         symbol = tick['symbol']
+        #self.log_blotter.info("In on_tick_received, symbol %s"%symbol)
+
         timestamp = datetime.strptime(tick['timestamp'],
                                       ibDataTypes["DATE_TIME_FORMAT_LONG_MILLISECS"])
 
@@ -624,13 +648,13 @@ class Blotter():
             timestamp = parse_date(timestamp)
         except Exception as e:
             pass
-
         # placeholders
         if symbol not in self._raw_bars:
             self._raw_bars[symbol] = self._raw_bars['~']
 
         if symbol not in self._bars:
             self._bars[symbol] = self._bars['~']
+
 
 
         #self.log_blotter.info('symbol : %s'%symbol)
@@ -644,70 +668,89 @@ class Blotter():
         tick_data = pd.DataFrame(index=['timestamp'],
                                  data={'timestamp': timestamp,
                                        'last': tick['last'],
-                                       'volume': tick['lastsize']})
+                                       'volume': tick['lastsize'],
+                                       'symbol_group' : tick['symbol_group'],
+                                       'asset_class' : tick['asset_class']})
+
         tick_data.set_index(['timestamp'], inplace=True)
-        _raw_bars = self._raw_bars[symbol].copy()
-        _bars = self._bars[symbol].copy()
-
-        _raw_bars = _raw_bars.append(tick_data)
+        self.log_blotter.info("tick_data")
         self.log_blotter.info(tick_data)
-        # add tools.resampled raw to self._bars
-        self.log_blotter.info("_raw_bars")
-        self.log_blotter.info(_raw_bars)
+
+        #self._raw_bars[symbol] = self._raw_bars[symbol].append(tick_data)
+        #self.log_blotter.info("self._raw_bars[symbol] ")
+        #self.log_blotter.info(self._raw_bars[symbol] )
+
+        bar = {'timestamp': timestamp.replace(
+                                       minute= (timestamp.minute // self.barsize) * self.barsize,
+                                       second = 0,
+                                       microsecond =0),
+              'symbol' : symbol,
+              'asset_class' :  tick['asset_class'],
+              'open': tick['last'],
+              'close': tick['last'],
+              'high': tick['last'],
+              'low': tick['last'],
+              'volume': tick['lastsize'],
+              }
 
 
-        self.log_blotter.info("_bars")
-        self.log_blotter.info(_bars)
+        self.log2db(bar, "BAR")
 
-        ohlc = _raw_bars['last'].resample('5T').ohlc()
-        vol = _raw_bars['volume'].resample('5T').sum()
+        bar.update({'timestamp': timestamp.replace(
+                                       hour = timestamp.hour ,
+                                       minute =0,
+                                       second = 0,
+                                       microsecond =0)})
 
-        opened_bar = ohlc
-        opened_bar['volume'] = vol
+        self.log2db(bar, "BAR_hour")
 
-        self.log_blotter.info("opened_bar")
-        self.log_blotter.info(opened_bar)
+        bar.update({'timestamp': (timestamp - timedelta(days=timestamp.weekday())).replace(
+                                       hour = 0 ,
+                                       minute =0,
+                                       second = 0,
+                                       microsecond =0)})
 
-        new_bar_count = len(opened_bar.index)
-        previous_bar_count =  len(_bars.index)
-        self.log_blotter.info(new_bar_count)
-        self.log_blotter.info(previous_bar_count)
+        self.log2db(bar, "BAR_week")
+    # -------------------------------------------
+    def check_new_bar(self, symbols):
 
+        #Wait a lag after the end building bar and send the bar
 
-        if new_bar_count > previous_bar_count :
-            """
-            self._bars[symbol] = self._bars[symbol].groupby(
-                self._bars[symbol].index).last()
-            """
+        lag = 1
+        now = datetime.now()
+        print('now           : %s '%now)
+        print('last bar time : %s'%self.last_bar_datetime)
+        #print(self._raw_bars)
 
-            self.log_blotter.info("New bar")
-            bar = opened_bar.to_dict(orient='records')[0]
+        if (now - self.last_bar_datetime) > timedelta(minutes=self.barsize, seconds=lag):
+            for symbol in symbols:
+                symbol = symbol[0]
+                # placeholders
+                bar = {}
+                bar["symbol"] = symbol
+                bar["asset_class"] = 'STK'
+                bar["timestamp"] = self.last_bar_datetime.strftime(
+                    ibDataTypes["DATE_TIME_FORMAT_LONG"])
 
-            self.log_blotter.info(bar)
+                #self.log_blotter.info(bar)
+                bar["kind"] = "BAR"
+                bar["granularity"] = "min"
+                bar["missing"] = True
 
-            #bar['volume'] = len(self._raw_bars[symbol].index) -1
+                self.log2db(bar, "BAR")
+                self.broadcast(bar, "BAR")
 
-            bar["symbol"] = symbol
-            bar["symbol_group"] = tick['symbol_group']
-            bar["asset_class"] = tick['asset_class']
-            bar["timestamp"] = opened_bar.index[0].strftime(
-                ibDataTypes["DATE_TIME_FORMAT_LONG"])
+                #self.log2db(bar, "BAR")
 
-            self.log_blotter.info(bar)
-            bar["kind"] = "BAR"
-            self.broadcast(bar, "BAR")
-            self.log2db(bar, "BAR")
+            self.last_bar_datetime += timedelta(minutes=self.barsize)
 
-            self._bars[symbol] = opened_bar[-1:]
-            self._raw_bars[symbol] = tick_data
+        else:
+            print('accumulation ...')
 
-        else :
-            self.log_blotter.info("bar in construction, append")
-            #update _bars
-            self._raw_bars[symbol] = _raw_bars
-            self._bars[symbol] = opened_bar
+        return
 
     # -------------------------------------------
+
     def broadcast(self, data, kind):
         def int64_handler(o):
             if isinstance(o, np_int64):
@@ -735,7 +778,7 @@ class Blotter():
         # connect to mysql per call (thread safe)
         if self.threads > 0:
             dbconn = self.get_mysql_connection()
-            dbcurr = dbconn.cursor()
+            dbculog2dbrr = dbconn.cursor()
         else:
             dbconn = self.dbconn
             dbcurr = self.dbcurr
@@ -757,10 +800,12 @@ class Blotter():
                 mysql_insert_tick(data, symbol_id, dbcurr)
             except Exception as e:
                 pass
-        elif kind == "BAR":
+        elif kind == "BAR" :
             try:
+                #print(data)
                 mysql_insert_bar(data, symbol_id, dbcurr)
             except Exception as e:
+                print(e)
                 pass
 
         # commit
@@ -889,8 +934,6 @@ class Blotter():
 
                     # request market data
                     for contract in contracts:
-                        print(contract)
-
                         if contract not in prev_contracts:
                             self.ibConn.requestMarketData(
                                 self.ibConn.createContract(contract))
@@ -903,7 +946,8 @@ class Blotter():
                             self.log_blotter.info(
                                 'Contract Added [%s]', contract_string)
 
-                    #print(self.ibConn.contract_details['m_tradingHours'])
+                    self.check_new_bar(contracts)
+                    #print(self.ibConn.contract_details)
 
                     # update latest contracts
                     prev_contracts = contracts
@@ -1079,7 +1123,8 @@ class Blotter():
                 if self.args["zmqtopic"] in message:
                     message = message.split(self.args["zmqtopic"])[1].strip()
                     data = json.loads(message)
-
+                    print("data is :")
+                    print(data)
                     if data['symbol'] not in symbols:
                         continue
 
@@ -1284,6 +1329,8 @@ class Blotter():
                 return
 
         # create database schema
+        print('*'*10)
+        print(path['library'])
         self.dbcurr.execute(open(path['library'] + '/schema.sql', "rb").read())
         try:
             self.dbconn.commit()
@@ -1478,7 +1525,7 @@ def mysql_insert_tick(data, symbol_id, dbcurr):
     # add greeks
     if dbcurr.lastrowid and data["asset_class"] in ("OPT", "FOP"):
         greeks_sql = """INSERT IGNORE INTO `greeks` (
-            `tick_id`, `price`, `underlying`, `dividend`, `volume`,
+            `tick_id`, `price`, `underlying`, `dividend`mysql_insert_missing_bar, `volume`,
             `iv`, `oi`, `delta`, `gamma`, `theta`, `vega`)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
@@ -1501,42 +1548,57 @@ def mysql_insert_tick(data, symbol_id, dbcurr):
 
 # -------------------------------------------
 def mysql_insert_bar(data, symbol_id, dbcurr):
-    sql = """INSERT IGNORE INTO `bars`
-        (`datetime`, `symbol_id`, `open`, `high`, `low`, `close`, `volume`)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            `open`=%s, `high`=%s, `low`=%s, `close`=%s, `volume`=`volume`+%s
-    """
-    dbcurr.execute(sql, (data["timestamp"], symbol_id,
-                         float(data["open"]), float(data["high"]), float(
-                             data["low"]), float(data["close"]), int(data["volume"]),
-                         float(data["open"]), float(data["high"]), float(
-        data["low"]), float(data["close"]), int(data["volume"])
-    ))
 
-    # add greeks
-    if dbcurr.lastrowid and data["asset_class"] in ("OPT", "FOP"):
-        greeks_sql = """INSERT IGNORE INTO `greeks` (
-            `bar_id`, `price`, `underlying`, `dividend`, `volume`,
-            `iv`, `oi`, `delta`, `gamma`, `theta`, `vega`)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    if "missing" in data and bar["missing"]:
+        # Insert last row at timestamp, volume 0
+        sql = """INSERT INTO bars (datetime, symbol_id,open,high,low,close,volume)
+        SELECT {datetime}, symbol_id,close,close,close,close,0 FROM bars_{granularity}
+        WHERE id = ( SELECT MAX(id) FROM bars_{granularity} WHERE symbol_id={symbol_id} );
+        """.format(symbol_id=symbol_id, datetime=data["timestamp"], granularity = data['granularity'])
+        #print(granularity)
+        #print("bars_%s"%granularity)
+        dbcurr.execute(sql)
+
+    else :
+
+        sql = """INSERT IGNORE INTO `{}`
+            (`datetime`, `symbol_id`, `open`, `high`, `low`, `close`, `volume`)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                 `high`=GREATEST(`high`,%s), `low`=LEAST(`low`,%s), `close`=%s, `volume`=`volume`+%s
         """
-        greeks = cash_ticks[data['symbol']]
-        try:
-            dbcurr.execute(greeks_sql, (dbcurr.lastrowid,
-                                        round(float(greeks["opt_price"]), 2), round(
-                                            float(greeks["opt_underlying"]), 5),
-                                        float(greeks["opt_dividend"]), int(
-                                            greeks["opt_volume"]),
-                                        float(greeks["opt_iv"]), float(
-                                            greeks["opt_oi"]),
-                                        float(greeks["opt_delta"]), float(
-                                            greeks["opt_gamma"]),
-                                        float(greeks["opt_theta"]), float(
-                                            greeks["opt_vega"]),
-                                        ))
-        except Exception as e:
-            pass
+        #print(granularity)
+        #print("bars_%s"%granularity)
+        dbcurr.execute(sql.format("bars_%s"%data['granularity']), ( data["timestamp"], symbol_id,
+                             float(data["open"]), float(data["high"]), float(
+                                 data["low"]), float(data["close"]), int(data["volume"]),
+                             float(data["high"]), float(
+            data["low"]), float(data["close"]), int(data["volume"])
+        ))
+
+        # add greeks
+        if dbcurr.lastrowid and data["asset_class"] in ("OPT", "FOP"):
+            greeks_sql = """INSERT IGNORE INTO `greeks` (
+                `bar_id`, `price`, `underlying`, `dividend`, `volume`,
+                `iv`, `oi`, `delta`, `gamma`, `theta`, `vega`)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            greeks = cash_ticks[data['symbol']]
+            try:
+                dbcurr.execute(greeks_sql, (dbcurr.lastrowid,
+                                            round(float(greeks["opt_price"]), 2), round(
+                                                float(greeks["opt_underlying"]), 5),
+                                            float(greeks["opt_dividend"]), int(
+                                                greeks["opt_volume"]),
+                                            float(greeks["opt_iv"]), float(
+                                                greeks["opt_oi"]),
+                                            float(greeks["opt_delta"]), float(
+                                                greeks["opt_gamma"]),
+                                            float(greeks["opt_theta"]), float(
+                                                greeks["opt_vega"]),
+                                            ))
+            except Exception as e:
+                pass
 
 # -------------------------------------------
 
@@ -1560,7 +1622,7 @@ def prepare_history(data, resolution="1T", tz="UTC", continuous=True):
 
         # generate dict of df per future
         futures_symbol_groups = list(
-            data[data['asset_class'] == 'FUT']['symbol_group'].unique())
+            data[data['asset_clasmaxs'] == 'FUT']['symbol_group'].unique())
         for key in futures_symbol_groups:
             future_group = data[data['symbol_group'] == key]
             continuous = futures.create_continuous_contract(

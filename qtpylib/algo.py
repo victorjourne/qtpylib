@@ -296,48 +296,8 @@ class Algo(Broker):
 
         history = pd.DataFrame()
 
-        # get history from csv dir
-        if self.backtest and self.backtest_csv:
-            kind = "TICK" if self.resolution[-1] in ("S", "K", "V") else "BAR"
-            dfs = []
-            for symbol in self.symbols:
-                file = "%s/%s.%s.csv" % (self.backtest_csv, symbol, kind)
-                if not os.path.exists(file):
-                    self.log_algo.error(
-                        "Can't load data for %s (%s doesn't exist)",
-                        symbol, file)
-                    sys.exit(0)
-                try:
-                    df = pd.read_csv(file)
-                    if "expiry" not in df.columns:
-                        df.loc[:, "expiry"] = nan
 
-                    if not validate_csv_columns(df, kind, raise_errors=False):
-                        self.log_algo.error(
-                            "%s isn't a QTPyLib-compatible format", file)
-                        sys.exit(0)
-
-                    if df['symbol'].values[-1] != symbol:
-                        self.log_algo.error(
-                            "%s Doesn't content data for %s", file, symbol)
-                        sys.exit(0)
-
-                    dfs.append(df)
-
-                except Exception as e:
-                    self.log_algo.error(
-                        "Error reading data for %s (%s)", symbol, file)
-                    sys.exit(0)
-
-            history = prepare_history(
-                data=pd.concat(dfs, sort=True),
-                resolution=self.resolution,
-                tz=self.timezone,
-                continuous=self.continuous
-            )
-            history = history[history.index >= self.backtest_start]
-
-        elif not self.blotter_args["dbskip"] and (
+        if not self.blotter_args["dbskip"] and (
                 self.backtest or self.preload):
 
             start = self.backtest_start if self.backtest else tools.backdate(
@@ -383,16 +343,7 @@ class Algo(Broker):
             history['symbol_group'] = history['symbol_group'].astype('category')
             history['asset_class'] = history['asset_class'].astype('category')
 
-        if self.backtest:
-            # initiate strategy
-            self.on_start()
-
-            # drip history
-            drip_handler = self._tick_handler if self.resolution[-1] in (
-                "S", "K", "V") else self._bar_handler
-            self.blotter.drip(history, drip_handler)
-
-        else:
+        else: # On rentre ici
             # place history self.bars
             self.bars = history
 
