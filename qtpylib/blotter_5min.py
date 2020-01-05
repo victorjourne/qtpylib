@@ -132,7 +132,7 @@ class Blotter():
 
         # do not act on first tick (timezone is incorrect)
         self.first_tick = True
-
+        now = datetime.now()
         self._bars = pd.DataFrame(
             columns=['open', 'high', 'low', 'close', 'volume'])
         self._bars.index.names = ['datetime']
@@ -145,7 +145,9 @@ class Blotter():
         self._raw_bars.index = pd.to_datetime(self._raw_bars.index, utc=True)
         self._raw_bars = {"~": self._raw_bars}
 
-
+        #self._trading_hours = pd.DataFrame(columns=['opening', 'closing'])
+        self._trading_hours = [now, now] # Market close
+        self._trading_hours = {"~": self._trading_hours}
 
         # global objects
         self.dbcurr = None
@@ -176,20 +178,32 @@ class Blotter():
         self.args.update(self.load_cli_args())
 
         # last_bar_datetime
-        self.last_bar_datetime = datetime.now()
 
         if 'barsize' not in self.args:
              self.barsize = barsize
         else:
             self.barsize = int(self.args['barsize'])
 
-        self.last_bar_datetime = self.last_bar_datetime + timedelta(minutes=self.barsize)
+        self.last_bar_datetime = now + timedelta(minutes=self.barsize)
         self.last_bar_datetime  = self.last_bar_datetime .replace(minute= (self.last_bar_datetime.minute // self.barsize) * self.barsize,
                                        second = 0,
                                        microsecond =0)
+        self.last_bar_datetime = {'min' : self.last_bar_datetime,
+                                  'hour': now.replace(minute=0,
+                                                      second = 0,
+                                                      microsecond =0),
+                                  'day' : now.replace(hour=0,
+                                                      minute=0,
+                                                      second = 0,
+                                                      microsecond =0)
+                                    }
+
+        self.bar_size = {'min' : timedelta(minutes=self.barsize),
+                        'hour' : timedelta(hours=1),
+                        'day' : timedelta(days=1)}
 
         #self.last_bar_datetime = {"~":   self.last_bar_datetime}
-        print('Next valid bar at %s' % self.last_bar_datetime )
+        print('Next valid bar at %s' % self.last_bar_datetime['min'] )
 
 
         # read cached args to detect duplicate blotters
@@ -343,6 +357,10 @@ class Blotter():
             self._on_exit(terminate=False)
             self.run()
 
+        elif caller == "handleContractDetails":
+            print("handleContractDetails    :")
+            self.on_contract_details_received(msg.contractDetails)
+
         elif caller == "handleHistoricalData":
             self.on_ohlc_received(msg, kwargs)
 
@@ -372,6 +390,44 @@ class Blotter():
                 self.log_blotter.error(
                     '[IB #%d] %s', msg.errorCode, msg.errorMsg)
 
+    # -------------------------------------------
+    @asynctools.multitasking.task
+    def on_contract_details_received(self, msg):
+
+        """
+        print(vars(msg)['m_liquidHours'])
+        print(msg.m_liquidHours)
+        print(dir(msg))
+        """
+        symbol = msg.m_summary['m_symbol']
+        print("Inside on_contract_details_received : %s"%symbol)
+        now = datetime.now()
+
+        if symbol not in self._trading_hours:
+            #m_liquidHours = ['%s:CLOSE' %datetime.now().strftime("%Y%m%d")] ##self.trading_hours['~']
+            m_liquidHours = [now, now]
+
+        if hasattr(msg, 'm_liquidHours'):
+            m_liquidHours = msg.m_liquidHours.split(';')
+
+        list_liquidHours = []
+        for lh in m_liquidHours:
+            if 'CLOSED' in lh:
+                h_close = datetime.strptime(lh.split(':')[0],  "%Y%m%d")
+                h_open = h_close
+                list_liquidHours.append([h_open, h_close])
+            else :
+
+                h_open, h_close = lh.split("-")
+                h_open = datetime.strptime(h_open, "%Y%m%d:%H%M")
+                h_close = datetime.strptime(h_close, "%Y%m%d:%H%M")
+                list_liquidHours.append([h_open,h_close ])
+
+            if now.date() == h_close.date() :
+                m_liquidHours = [h_open, h_close]
+        #print(list_liquidHours)
+
+        self._trading_hours[symbol] = m_liquidHours
     # -------------------------------------------
     def on_ohlc_received(self, msg, kwargs):
         symbol = self.ibConn.tickerSymbol(msg.reqId)
@@ -712,43 +768,61 @@ class Blotter():
 
         self.log2db(bar, "BAR_week")
     # -------------------------------------------
-    def check_new_bar(self, symbols):
+    @asynctools.multitasking.task
+    def new_bar(self, symbol, last_bar_datetime, granularity):
 
         #Wait a lag after the end building bar and send the bar
 
-        lag = 1
-        now = datetime.now()
-        print('now           : %s '%now)
-        print('last bar time : %s'%self.last_bar_datetime)
+
         #print(self._raw_bars)
+        bar = {}
+        bar["symbol"] = symbol
+        bar["asset_class"] = 'STK'
+        bar["timestamp"] = last_bar_datetime.strftime(
+            ibDataTypes["DATE_TIME_FORMAT_LONG"])
 
-        if (now - self.last_bar_datetime) > timedelta(minutes=self.barsize, seconds=lag):
-            for symbol in symbols:
-                symbol = symbol[0]
-                # placeholders
-                bar = {}
-                bar["symbol"] = symbol
-                bar["asset_class"] = 'STK'
-                bar["timestamp"] = self.last_bar_datetime.strftime(
-                    ibDataTypes["DATE_TIME_FORMAT_LONG"])
+        #self.log_blotter.info(bar)
+        bar["kind"] = "BAR"
+        bar["granularity"] = granularity
+        bar["missing"] = True
 
-                #self.log_blotter.info(bar)
-                bar["kind"] = "BAR"
-                bar["granularity"] = "min"
-                bar["missing"] = True
+        self.log2db(bar, "BAR")
+        self.broadcast(bar, "BAR")
 
-                self.log2db(bar, "BAR")
-                self.broadcast(bar, "BAR")
+        #self.log2db(bar, "BAR")
 
-                #self.log2db(bar, "BAR")
 
-            self.last_bar_datetime += timedelta(minutes=self.barsize)
-
-        else:
-            print('accumulation ...')
 
         return
 
+    # -------------------------------------------
+    def check_new_bar(self, contracts, now, granularity):
+
+        last_bar_datetime = self.last_bar_datetime[granularity]
+        lag = 1
+        print('now           : %s '%now)
+        print('last  %s    : %s'%(granularity, last_bar_datetime))
+
+        if (now - last_bar_datetime) > self.bar_size[granularity] + timedelta(seconds=lag) :
+
+            for contract in contracts:
+                contract = contract[0]
+                if contract not in self._trading_hours :
+                    self._trading_hours[granularity] = self._trading_hours['~']
+
+                # test market open/close :
+                if (now >= self._trading_hours[contract][0])  and (now < self._trading_hours[contract][1]) :
+                    print('Market is open for contract %s '%contract)
+                    # non blocking
+                    self.new_bar(contract, last_bar_datetime, granularity)
+                else:
+                    print('Market is close for contract %s '%contract)
+
+            self.last_bar_datetime[granularity] = last_bar_datetime + self.bar_size[granularity]
+            return True
+        else:
+            print('accumulation ...')
+            return False
     # -------------------------------------------
 
     def broadcast(self, data, kind):
@@ -840,6 +914,7 @@ class Blotter():
         contracts = []
         prev_contracts = []
         first_run = True
+        new_hour, new_day = False, False
 
         self.log_blotter.info("Connecting to Interactive Brokers...")
         self.ibConn = ezIBpy()
@@ -934,7 +1009,11 @@ class Blotter():
 
                     # request market data
                     for contract in contracts:
+
+
+
                         if contract not in prev_contracts:
+
                             self.ibConn.requestMarketData(
                                 self.ibConn.createContract(contract))
                             if self.args['orderbook']:
@@ -946,11 +1025,34 @@ class Blotter():
                             self.log_blotter.info(
                                 'Contract Added [%s]', contract_string)
 
-                    self.check_new_bar(contracts)
-                    #print(self.ibConn.contract_details)
+
+                    now = datetime.now()
+
+                    new_min = self.check_new_bar(contracts, now, 'min')
+
+                    if new_min :
+                        new_hour = self.check_new_bar(contracts, now, 'hour')
+
+                    if new_hour:
+                        new_day = self.check_new_bar(contracts, now, 'day')
+
+                    if new_day:
+                        # update self_trading_hours every day for each contract
+
+                       # non blocking
+                        self.ibConn.requestContractDetails(
+                            self.ibConn.createContract(contract))
+
+                        # drop ticks of last day
+                        print('**** DROP ticks of past day *****')
+                        self.dbcurr.execute("""DELETE FROM ticks WHERE DATE(datetime) != '%s'"""%self.last_bar_datetime['day'].strftime("%Y-%m-%d"))
+
+
 
                     # update latest contracts
                     prev_contracts = contracts
+
+
 
                 time.sleep(2)
 
@@ -1549,10 +1651,10 @@ def mysql_insert_tick(data, symbol_id, dbcurr):
 # -------------------------------------------
 def mysql_insert_bar(data, symbol_id, dbcurr):
 
-    if "missing" in data and bar["missing"]:
+    if "missing" in data and data["missing"]:
         # Insert last row at timestamp, volume 0
-        sql = """INSERT INTO bars (datetime, symbol_id,open,high,low,close,volume)
-        SELECT {datetime}, symbol_id,close,close,close,close,0 FROM bars_{granularity}
+        sql = """INSERT INTO bars_{granularity} (datetime, symbol_id,open,high,low,close,volume)
+        SELECT '{datetime}', symbol_id,close,close,close,close,0 FROM bars_{granularity}
         WHERE id = ( SELECT MAX(id) FROM bars_{granularity} WHERE symbol_id={symbol_id} );
         """.format(symbol_id=symbol_id, datetime=data["timestamp"], granularity = data['granularity'])
         #print(granularity)
