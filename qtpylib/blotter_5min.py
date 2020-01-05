@@ -811,7 +811,7 @@ class Blotter():
                     self._trading_hours[granularity] = self._trading_hours['~']
 
                 # test market open/close :
-                if (now >= self._trading_hours[contract][0])  and (now < self._trading_hours[contract][1]) :
+                if (last_bar_datetime >= self._trading_hours[contract][0])  and (last_bar_datetime < self._trading_hours[contract][1]) :
                     print('Market is open for contract %s '%contract)
                     # non blocking
                     self.new_bar(contract, last_bar_datetime, granularity)
@@ -1009,9 +1009,6 @@ class Blotter():
 
                     # request market data
                     for contract in contracts:
-
-
-
                         if contract not in prev_contracts:
 
                             self.ibConn.requestMarketData(
