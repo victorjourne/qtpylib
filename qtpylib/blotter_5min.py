@@ -56,6 +56,7 @@ from qtpylib import (
     tools, asynctools, path, futures, __version__
 )
 
+
 # =============================================
 # check min, python version
 if sys.version_info < (3, 4):
@@ -78,6 +79,24 @@ asynctools.multitasking.createPool(__name__, __threads__)
 
 cash_ticks = {}
 
+def timing(f):
+    def wrap(*args):
+        time1 = time.time()
+        ret = f(*args)
+
+        time2 = time.time()
+        if 1000.*(time2 - time1) > 100: # ms
+            if args[2] == 'BAR':
+                if "missing" in args[1] :
+                    print('{:s} function took {:.3f} ms to execute {} {:s} ({}-{}-missing)'.format(f.__name__, (time2-time1)*1000.0,args[1]['granularity'], args[2], args[1]['timestamp'], args[1]['symbol']))
+                else:
+                    print('{:s} function took {:.3f} ms to execute {} {:s} ({}-{})'.format(f.__name__, (time2-time1)*1000.0,args[1]['granularity'], args[2], args[1]['timestamp'], args[1]['symbol']))
+
+            else:
+                print('{:s} function took {:.3f} ms to execute {:s}'.format(f.__name__, (time2-time1)*1000.0, args[2]))
+
+        return ret
+    return wrap
 
 class Blotter():
     """Broker class initilizer
@@ -124,12 +143,22 @@ class Blotter():
 
         # whats my name?
         self.name = str(self.__class__).split('.')[-1].split("'")[0].lower()
+        name = tools.read_single_argv("--name")
         if name is not None:
             self.name = name
-
+        print("name is : %s"%self.name )
         # initilize class logge 2>&1r
         self.log_blotter = logging.getLogger(__name__)
 
+        # -------------------------------
+        # work default values
+        # -------------------------------
+        if zmqtopic is None:
+            zmqtopic = "_qtpylib_" + str(self.name.lower()) + "_"
+        print("zmqtopic is : %s"%zmqtopic)
+        # if no path given for symbols' csv, use same dir
+        if symbols == "symbols.csv":
+            symbols = path['caller'] + '/' + symbols
         # do not act on first tick (timezone is incorrect)
         self.first_tick = True
         now = datetime.now()
@@ -148,7 +177,7 @@ class Blotter():
         #self._trading_hours = pd.DataFrame(columns=['opening', 'closing'])
         self._trading_hours = [now, now] # Market close
         self._trading_hours = {"~": self._trading_hours}
-
+        self.contracts = [[""]]
         # global objects
         self.dbcurr = None
         self.dbconn = None
@@ -160,16 +189,6 @@ class Blotter():
         self.cash_ticks = cash_ticks  # outside cache
         self.rtvolume = set()  # has RTVOLUME?
 
-        # -------------------------------
-        # work default values
-        # -------------------------------
-        if zmqtopic is None:
-            zmqtopic = "_qtpylib_" + str(self.name.lower()) + "_"
-
-        # if no path given for symbols' csv, use same dir
-        if symbols == "symbols.csv":
-            symbols = path['caller'] + '/' + symbols
-        # -------------------------------
 
         # override args with any (non-default) command-line args
         self.args = {arg: val for arg, val in locals().items(
@@ -177,14 +196,18 @@ class Blotter():
         self.args.update(kwargs)
         self.args.update(self.load_cli_args())
 
-        # last_bar_datetime
 
+
+
+        # -------------------------------
+
+        # last_bar_datetime
         if 'barsize' not in self.args:
              self.barsize = barsize
         else:
             self.barsize = int(self.args['barsize'])
 
-        self.last_bar_datetime = now + timedelta(minutes=self.barsize)
+        self.last_bar_datetime = now #+ timedelta(minutes=self.barsize)
         self.last_bar_datetime  = self.last_bar_datetime .replace(minute= (self.last_bar_datetime.minute // self.barsize) * self.barsize,
                                        second = 0,
                                        microsecond =0)
@@ -227,7 +250,8 @@ class Blotter():
 
         # be aware of thread count
         self.threads = asynctools.multitasking.getPool(__name__)['threads']
-
+        print("Number of threads :")
+        print(self.threads)
     # -------------------------------------------
     def _on_exit(self, terminate=True):
         if "as_client" in self.args:
@@ -312,7 +336,8 @@ class Blotter():
         parser = argparse.ArgumentParser(
             description='QTPyLib Blotter',
             formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-
+        parser.add_argument('--name', default=None,
+                    help='Name of the blotter', required=False)
         parser.add_argument('--symbols', default=self.args['symbols'],
                             help='IB contracts CSV database', required=False)
         parser.add_argument('--ibport', default=self.args['ibport'],
@@ -357,9 +382,10 @@ class Blotter():
             self._on_exit(terminate=False)
             self.run()
 
+
         elif caller == "handleContractDetails":
-            print("handleContractDetails    :")
             self.on_contract_details_received(msg.contractDetails)
+
 
         elif caller == "handleHistoricalData":
             self.on_ohlc_received(msg, kwargs)
@@ -391,6 +417,7 @@ class Blotter():
                     '[IB #%d] %s', msg.errorCode, msg.errorMsg)
 
     # -------------------------------------------
+
     @asynctools.multitasking.task
     def on_contract_details_received(self, msg):
 
@@ -405,11 +432,21 @@ class Blotter():
 
         if symbol not in self._trading_hours:
             #m_liquidHours = ['%s:CLOSE' %datetime.now().strftime("%Y%m%d")] ##self.trading_hours['~']
-            m_liquidHours = [now, now]
+            m_liquidHours = []
+            _trading_hours = [now, now]
 
         if hasattr(msg, 'm_liquidHours'):
             m_liquidHours = msg.m_liquidHours.split(';')
+            _trading_hours = [now, now]
 
+        """
+        # try to fetch opening table
+        sql = "SELECT open, close FROM opening WHERE DATE(datetime) = '%s' AND symbol_id = '%s'"%(now.date(),symbol)
+        self.dbcurr.execute(sql)
+        m_liquidHours_db = self.dbcurr.fetchone()
+        print("/"*10)
+        print(m_liquidHours_db)
+        """
         list_liquidHours = []
         for lh in m_liquidHours:
             if 'CLOSED' in lh:
@@ -424,10 +461,22 @@ class Blotter():
                 list_liquidHours.append([h_open,h_close ])
 
             if now.date() == h_close.date() :
-                m_liquidHours = [h_open, h_close]
+                _trading_hours = [h_open, h_close]
         #print(list_liquidHours)
 
-        self._trading_hours[symbol] = m_liquidHours
+        self._trading_hours[symbol] = _trading_hours
+
+        # Update _trading_hours
+        data = {
+            "symbol": symbol,
+            "asset_class": 'STK', # should be contained in msg ...
+            "m_liquidHours" : list_liquidHours[0:3], # today and tomorrow
+            "timestamp" : now
+                }
+        #print([contract[0] for contract in self.contracts])
+        if symbol in [contract[0] for contract in self.contracts]:
+            self.log2db(data, 'OPENING')
+
     # -------------------------------------------
     def on_ohlc_received(self, msg, kwargs):
         symbol = self.ibConn.tickerSymbol(msg.reqId)
@@ -480,6 +529,7 @@ class Blotter():
             self.log2db(data, data["kind"])
 
     # -------------------------------------------
+
     @asynctools.multitasking.task
     def on_tick_string_received(self, tickerId, kwargs):
 
@@ -682,8 +732,8 @@ class Blotter():
 
         # broadcast
         self.broadcast(orderbook, "ORDERBOOK")
-
     # -------------------------------------------
+
     @asynctools.multitasking.task
     def on_tick_received(self, tick):
         # data
@@ -705,20 +755,21 @@ class Blotter():
         except Exception as e:
             pass
         # placeholders
+        """
         if symbol not in self._raw_bars:
             self._raw_bars[symbol] = self._raw_bars['~']
 
         if symbol not in self._bars:
             self._bars[symbol] = self._bars['~']
 
-
+        """
 
         #self.log_blotter.info('symbol : %s'%symbol)
 
         # send tick to message self.broadcast
         tick["kind"] = "TICK"
         self.broadcast(tick, "TICK")
-        self.log2db(tick, "TICK")
+        #self.log2db(tick, "TICK")
 
         # add tick to self._raw_bars
         tick_data = pd.DataFrame(index=['timestamp'],
@@ -729,8 +780,8 @@ class Blotter():
                                        'asset_class' : tick['asset_class']})
 
         tick_data.set_index(['timestamp'], inplace=True)
-        self.log_blotter.info("tick_data")
-        self.log_blotter.info(tick_data)
+        #self.log_blotter.info("tick_data")
+        #self.log_blotter.info(tick_data)
 
         #self._raw_bars[symbol] = self._raw_bars[symbol].append(tick_data)
         #self.log_blotter.info("self._raw_bars[symbol] ")
@@ -747,6 +798,8 @@ class Blotter():
               'high': tick['last'],
               'low': tick['last'],
               'volume': tick['lastsize'],
+              'granularity' : "min",
+              'kind' : 'BAR'
               }
 
 
@@ -756,23 +809,39 @@ class Blotter():
                                        hour = timestamp.hour ,
                                        minute =0,
                                        second = 0,
-                                       microsecond =0)})
+                                       microsecond =0),
+                    'granularity' : "hour"
+                    })
 
-        self.log2db(bar, "BAR_hour")
+        self.log2db(bar, "BAR")
+
+        bar.update({'timestamp': timestamp.replace(
+                                   day = timestamp.day,
+                                   hour = 0 ,
+                                   minute =0,
+                                   second = 0,
+                                   microsecond =0),
+                'granularity' : "day"
+                })
+
+        self.log2db(bar, "BAR")
 
         bar.update({'timestamp': (timestamp - timedelta(days=timestamp.weekday())).replace(
                                        hour = 0 ,
                                        minute =0,
                                        second = 0,
-                                       microsecond =0)})
+                                       microsecond =0),
+                    'granularity' : "week"
+                        })
 
-        self.log2db(bar, "BAR_week")
+        self.log2db(bar, "BAR")
     # -------------------------------------------
+
     @asynctools.multitasking.task
     def new_bar(self, symbol, last_bar_datetime, granularity):
 
         #Wait a lag after the end building bar and send the bar
-
+        #print("Trhread safe")
 
         #print(self._raw_bars)
         bar = {}
@@ -789,13 +858,13 @@ class Blotter():
         self.log2db(bar, "BAR")
         self.broadcast(bar, "BAR")
 
-        #self.log2db(bar, "BAR")
 
 
 
         return
 
     # -------------------------------------------
+
     def check_new_bar(self, contracts, now, granularity):
 
         last_bar_datetime = self.last_bar_datetime[granularity]
@@ -805,18 +874,42 @@ class Blotter():
 
         if (now - last_bar_datetime) > self.bar_size[granularity] + timedelta(seconds=lag) :
 
+            contract_open = []
             for contract in contracts:
+                time.sleep(0.01)
                 contract = contract[0]
                 if contract not in self._trading_hours :
-                    self._trading_hours[granularity] = self._trading_hours['~']
+                    self.log_blotter.info("Here trading hour is : %s"%self._trading_hours)
+                    self._trading_hours[contract] = self._trading_hours['~']
 
+                print(last_bar_datetime, self._trading_hours[contract])
                 # test market open/close :
                 if (last_bar_datetime >= self._trading_hours[contract][0])  and (last_bar_datetime < self._trading_hours[contract][1]) :
-                    print('Market is open for contract %s '%contract)
+                    self.log_blotter.info('Market is open for contract %s '%contract)
                     # non blocking
-                    self.new_bar(contract, last_bar_datetime, granularity)
+                    contract_open +=  [contract]
+                    if granularity in ["min", "hour"]:
+                        self.new_bar(contract, last_bar_datetime, granularity)
+
                 else:
-                    print('Market is close for contract %s '%contract)
+                    self.log_blotter.info('Market is close for contract %s '%contract)
+
+                #contract_open +=  [contract]
+
+            if granularity == "min" and len(contract_open)>0:
+                ### Send syncrone trigger for all contracts
+                bar = {}
+                bar["cron"] = True
+                bar["symbol"] = contract_open
+                #bar['trading_hours'] = self._trading_hours
+                bar["asset_class"] = 'STK'
+                bar["timestamp"] = last_bar_datetime.strftime(
+                    ibDataTypes["DATE_TIME_FORMAT_LONG"])
+
+                #self.log_blotter.info(bar)
+                bar["kind"] = "BAR"
+                bar["granularity"] = granularity
+                self.broadcast(bar, "BAR")
 
             self.last_bar_datetime[granularity] = last_bar_datetime + self.bar_size[granularity]
             return True
@@ -838,21 +931,23 @@ class Blotter():
         string2send = "%s %s" % (
             self.args["zmqtopic"], json.dumps(data, default=int64_handler))
 
-        # print(kind, string2send)
         try:
             self.socket.send_string(string2send)
         except Exception as e:
+            print('Broadcast error : ')
+            print(e)
             pass
 
     # -------------------------------------------
+    @timing
     def log2db(self, data, kind):
         if self.args['dbskip'] or len(data["symbol"].split("_")) > 2:
             return
-
+        self.threads = 1
         # connect to mysql per call (thread safe)
         if self.threads > 0:
             dbconn = self.get_mysql_connection()
-            dbculog2dbrr = dbconn.cursor()
+            dbcurr = dbconn.cursor()
         else:
             dbconn = self.dbconn
             dbcurr = self.dbcurr
@@ -873,20 +968,34 @@ class Blotter():
             try:
                 mysql_insert_tick(data, symbol_id, dbcurr)
             except Exception as e:
-                pass
+                print('Cannot insert TICK')
+                print(e)
+                print(data)
+                print(symbol_id)
+
         elif kind == "BAR" :
             try:
-                #print(data)
                 mysql_insert_bar(data, symbol_id, dbcurr)
             except Exception as e:
                 print(e)
-                pass
+                print(data)
+                self.log_blotter.info('Cannot insert BAR')
+
+
+        elif kind == "OPENING" :
+            try:
+                mysql_insert_opening(data, symbol_id, dbcurr)
+            except Exception as e:
+                print('Cannot insert OPENING')
+                print(e)
 
         # commit
         try:
             dbconn.commit()
         except Exception as e:
-            pass
+            print("Cannot commit")
+            print(e)
+
 
         # disconect from mysql
         if self.threads > 0:
@@ -986,19 +1095,20 @@ class Blotter():
 
                     # ignore commentee
                     df = df[~df['symbol'].str.contains("#")]
-                    contracts = [tuple(x) for x in df.values]
+                    self.contracts = [tuple(x) for x in df.values]
 
                     if first_run:
                         first_run = False
 
                     else:
-                        if contracts != prev_contracts:
+                        if self.contracts  != prev_contracts:
                             # cancel market data for removed contracts
                             for contract in prev_contracts:
-                                if contract not in contracts:
+                                if contract not in self.contracts :
                                     self.ibConn.cancelMarketData(
                                         self.ibConn.createContract(contract))
                                     if self.args['orderbook']:
+                                        print("ORER BOOK ASKED !!!")
                                         self.ibConn.cancelMarketDepth(
                                             self.ibConn.createContract(contract))
                                     time.sleep(0.1)
@@ -1008,7 +1118,9 @@ class Blotter():
                                         'Contract Removed [%s]', contract_string)
 
                     # request market data
-                    for contract in contracts:
+                    for contract in self.contracts:
+                        #print(self.ibConn.contractDetails(contract[0]))
+
                         if contract not in prev_contracts:
 
                             self.ibConn.requestMarketData(
@@ -1025,29 +1137,34 @@ class Blotter():
 
                     now = datetime.now()
 
-                    new_min = self.check_new_bar(contracts, now, 'min')
+                    new_min = self.check_new_bar(self.contracts, now, 'min')
 
                     if new_min :
-                        new_hour = self.check_new_bar(contracts, now, 'hour')
+                        new_hour = self.check_new_bar(self.contracts, now, 'hour')
 
                     if new_hour:
-                        new_day = self.check_new_bar(contracts, now, 'day')
+                        new_day = self.check_new_bar(self.contracts, now, 'day')
 
                     if new_day:
+
                         # update self_trading_hours every day for each contract
 
-                       # non blocking
-                        self.ibConn.requestContractDetails(
+                        #  blocking
+                        for contract in self.contracts:
+                            self.ibConn.requestContractDetails(
                             self.ibConn.createContract(contract))
 
+
+                        """
                         # drop ticks of last day
                         print('**** DROP ticks of past day *****')
-                        self.dbcurr.execute("""DELETE FROM ticks WHERE DATE(datetime) != '%s'"""%self.last_bar_datetime['day'].strftime("%Y-%m-%d"))
+                        self.dbcurr.execute("DELETE FROM ticks WHERE DATE(datetime) != '%s'"%self.last_bar_datetime['day'].strftime("%Y-%m-%d"))
+                        """
 
 
 
                     # update latest contracts
-                    prev_contracts = contracts
+                    prev_contracts = self.contracts
 
 
 
@@ -1203,7 +1320,7 @@ class Blotter():
 
     # -------------------------------------------
     def stream(self, symbols, tick_handler=None, bar_handler=None,
-               quote_handler=None, book_handler=None, tz="UTC"):
+               quote_handler=None, book_handler=None,contract_restriction=True):
         # load runtime/default data
         if isinstance(symbols, str):
             symbols = symbols.split(',')
@@ -1218,13 +1335,13 @@ class Blotter():
         try:
             while True:
                 message = sock.recv_string()
-
+                #print("message is %s"%message)
                 if self.args["zmqtopic"] in message:
                     message = message.split(self.args["zmqtopic"])[1].strip()
                     data = json.loads(message)
-                    print("data is :")
-                    print(data)
-                    if data['symbol'] not in symbols:
+                    # TODO : There is a lot of quote!!
+                    print(data['symbol'])
+                    if contract_restriction and data['symbol'] not in symbols:
                         continue
 
                     # convert None to np.nan !!
@@ -1242,30 +1359,14 @@ class Blotter():
                             quote_handler(data)
                             continue
 
-                    try:
-                        data["datetime"] = parse_date(data["timestamp"])
-                    except Exception as e:
-                        pass
-
-                    df = pd.DataFrame(index=[0], data=data)
-                    df.set_index('datetime', inplace=True)
-                    df.index = pd.to_datetime(df.index, utc=True)
-                    df.drop(["timestamp", "kind"], axis=1, inplace=True)
-
-                    try:
-                        df.index = df.index.tz_convert(tz)
-                    except Exception as e:
-                        df.index = df.index.tz_localize('UTC').tz_convert(tz)
-
-                    # add options columns
-                    df = tools.force_options_columns(df)
-
                     if data['kind'] == "TICK":
                         if tick_handler is not None:
-                            tick_handler(df)
+                            tick_handler(data)
+                            continue
                     elif data['kind'] == "BAR":
                         if bar_handler is not None:
-                            bar_handler(df)
+                            bar_handler(data)
+                            continue
 
         except (KeyboardInterrupt, SystemExit):
             print(
@@ -1419,7 +1520,7 @@ class Blotter():
         self.dbcurr.execute("SHOW TABLES")
         tables = [table[0] for table in self.dbcurr.fetchall()]
 
-        required = ["bars", "ticks", "symbols",
+        required = ["bars_min", "ticks", "symbols",
                     "trades", "greeks", "_version_"]
         if all(item in tables for item in required):
             self.dbcurr.execute("SELECT version FROM `_version_`")
@@ -1480,6 +1581,8 @@ def load_blotter_args(blotter_name=None, logger=None):
     # find specific name
     if blotter_name is not None:  # and blotter_name != 'auto-detect':
         args_cache_file = tempfile.gettempdir() + "/" + blotter_name.lower() + ".qtpylib"
+        print("Read blotter %s"%args_cache_file)
+        logger.info("Read blotter %s"%args_cache_file)
         if not os.path.exists(args_cache_file):
             logger.critical(
                 "Cannot connect to running Blotter [%s]", blotter_name)
@@ -1536,6 +1639,8 @@ def get_symbol_id(symbol, dbconn, dbcurr, ibConn=None):
 
         # parse with ibConn
         contract_details = ibConn.contractDetails(symbol)["m_summary"]
+        print("contractDetails" + "*"*10)
+        print(contractDetails)
         if contract_details["m_expiry"] == "":
             ibConn.createContract(symbol)
             return _get_contract_expiry(symbol, ibConn)
@@ -1596,7 +1701,6 @@ def get_symbol_id(symbol, dbconn, dbcurr, ibConn=None):
             (`symbol`, `symbol_group`, `asset_class`, `expiry`) VALUES (%s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE `symbol`=`symbol`, `expiry`=%s
         """
-
         dbcurr.execute(sql, (clean_symbol, symbol_group,
                              asset_class, expiry, expiry))
         try:
@@ -1649,12 +1753,24 @@ def mysql_insert_tick(data, symbol_id, dbcurr):
 def mysql_insert_bar(data, symbol_id, dbcurr):
 
     if "missing" in data and data["missing"]:
+
+        #dbcurr.execute("""SELECT 1 FROM bars_%s WHERE datetime = '%s' AND symbol_id = '%s'"""%(data['granularity'],data["timestamp"], symbol_id))
+        #bar_exist = dbcurr.fetchone()
+        #print("bar_exist :")
+        #print(bar_exist)
+        #if bar_exist is None:
+        #    sql = """INSERT IGNORE INTO bars_{granularity} (datetime, symbol_id,open,high,low,close,volume)
+        #    SELECT '{datetime}', symbol_id,close,close,close,close,0 FROM bars_{granularity}
+        #    WHERE id = ( SELECT MAX(id) FROM bars_{granularity} WHERE symbol_id={symbol_id} AND datetime<{datetime});
+        #    """.format(symbol_id=symbol_id, datetime=data["timestamp"], granularity = data['granularity'])
+
         # Insert last row at timestamp, volume 0
-        sql = """INSERT INTO bars_{granularity} (datetime, symbol_id,open,high,low,close,volume)
+        sql = """INSERT IGNORE INTO bars_{granularity} (datetime, symbol_id,open,high,low,close,volume)
         SELECT '{datetime}', symbol_id,close,close,close,close,0 FROM bars_{granularity}
-        WHERE id = ( SELECT MAX(id) FROM bars_{granularity} WHERE symbol_id={symbol_id} );
+        WHERE id = ( SELECT MAX(id) FROM bars_{granularity} WHERE symbol_id='{symbol_id}' AND datetime<'{datetime}')
+        ON DUPLICATE KEY UPDATE market=TRUE;
         """.format(symbol_id=symbol_id, datetime=data["timestamp"], granularity = data['granularity'])
-        #print(granularity)
+        #print(sql)
         #print("bars_%s"%granularity)
         dbcurr.execute(sql)
 
@@ -1674,6 +1790,7 @@ def mysql_insert_bar(data, symbol_id, dbcurr):
                              float(data["high"]), float(
             data["low"]), float(data["close"]), int(data["volume"])
         ))
+
 
         # add greeks
         if dbcurr.lastrowid and data["asset_class"] in ("OPT", "FOP"):
@@ -1699,6 +1816,28 @@ def mysql_insert_bar(data, symbol_id, dbcurr):
             except Exception as e:
                 pass
 
+# -------------------------------------------
+def mysql_insert_opening(data, symbol_id, dbcurr):
+
+    sql = "SELECT open, close FROM opening WHERE DATE(datetime) = '%s' AND symbol_id = '%s'"%(data['timestamp'].date(),symbol_id)
+    dbcurr.execute(sql)
+    m_liquidHours_db = dbcurr.fetchone()
+    #print("m_liquidHours_db")
+    #print(m_liquidHours_db)
+    if m_liquidHours_db is None:
+    # Insert last row at timestamp, volume 0
+        for h_open, h_close in data['m_liquidHours']:
+            datetime = h_open.date()
+
+            sql = """INSERT IGNORE INTO `{table}`
+                (`datetime`, `symbol_id`, `open`, `close`)
+                    VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                      `open`=%s, `close`=%s
+            """.format(table='opening',symbol_id=symbol_id, datetime=datetime)
+            #print(granularity)
+            #print("bars_%s"%granularity)
+            dbcurr.execute(sql, (datetime, symbol_id, h_open, h_close, h_open, h_close))
 # -------------------------------------------
 
 

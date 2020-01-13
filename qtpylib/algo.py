@@ -33,7 +33,7 @@ from numpy import nan
 
 from qtpylib.broker import Broker
 from qtpylib.workflow import validate_columns as validate_csv_columns
-from qtpylib.blotter import prepare_history
+from qtpylib.blotter_5min import prepare_history
 from qtpylib import (
     tools, sms, asynctools
 )

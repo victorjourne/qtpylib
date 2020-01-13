@@ -41,7 +41,7 @@ from qtpylib.instrument import Instrument
 from qtpylib import (
     tools, sms
 )
-from qtpylib.blotter import (
+from qtpylib.blotter_5min import (
     Blotter, load_blotter_args
 )
 

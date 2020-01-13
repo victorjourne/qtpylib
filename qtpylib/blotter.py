@@ -194,7 +194,8 @@ class Blotter():
 
         # be aware of thread count
         self.threads = asynctools.multitasking.getPool(__name__)['threads']
-
+        print('Number of thread : ')
+        print(self.threads)
     # -------------------------------------------
     def _on_exit(self, terminate=True):
         if "as_client" in self.args:

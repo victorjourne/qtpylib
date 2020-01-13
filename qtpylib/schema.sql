@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS `bars_min` (
   `low` double unsigned DEFAULT NULL,
   `close` double unsigned DEFAULT NULL,
   `volume` int(11) unsigned DEFAULT NULL,
+  `market` boolean unsigned DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `key` (`datetime`,`symbol_id`),
   KEY `datetime` (`datetime`),
@@ -68,12 +69,32 @@ CREATE TABLE IF NOT EXISTS `bars_hour` (
   `low` double unsigned DEFAULT NULL,
   `close` double unsigned DEFAULT NULL,
   `volume` int(11) unsigned DEFAULT NULL,
+  `market` boolean unsigned DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `key` (`datetime`,`symbol_id`),
   KEY `datetime` (`datetime`),
   KEY `symbol_id` (`symbol_id`),
   CONSTRAINT `bar_hour_symbol` FOREIGN KEY (`symbol_id`) REFERENCES `symbols` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+
+
+CREATE TABLE IF NOT EXISTS `bars_day` (
+  `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
+  `datetime` datetime NOT NULL,
+  `symbol_id` int(11) unsigned NOT NULL,
+  `open` double unsigned DEFAULT NULL,
+  `high` double unsigned DEFAULT NULL,
+  `low` double unsigned DEFAULT NULL,
+  `close` double unsigned DEFAULT NULL,
+  `volume` int(11) unsigned DEFAULT NULL,
+  `market` boolean unsigned DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `key` (`datetime`,`symbol_id`),
+  KEY `datetime` (`datetime`),
+  KEY `symbol_id` (`symbol_id`),
+  CONSTRAINT `bar_day_symbol` FOREIGN KEY (`symbol_id`) REFERENCES `symbols` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+
 
 CREATE TABLE IF NOT EXISTS `bars_week` (
   `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
@@ -157,6 +178,19 @@ CREATE TABLE IF NOT EXISTS `trades` (
   KEY `market_price` (`market_price`),
   KEY `exit_price` (`exit_price`),
   KEY `entry_price` (`entry_price`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS  `opening` (
+  `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
+  `datetime` date NOT NULL,
+  `symbol_id` int(11) unsigned NOT NULL,
+  `open` datetime DEFAULT NULL,
+  `close` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `key` (`datetime`,`symbol_id`),
+  KEY `datetime` (`datetime`),
+  KEY `symbol_id` (`symbol_id`),
+  CONSTRAINT `opening_symbol` FOREIGN KEY (`symbol_id`) REFERENCES `symbols` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
 
 SET foreign_key_checks = 1;
