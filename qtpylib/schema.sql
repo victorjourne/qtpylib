@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS `bars_min` (
   `low` double unsigned DEFAULT NULL,
   `close` double unsigned DEFAULT NULL,
   `volume` int(11) unsigned DEFAULT NULL,
-  `market` boolean unsigned DEFAULT NULL,
+  `market` boolean DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `key` (`datetime`,`symbol_id`),
   KEY `datetime` (`datetime`),
@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS `bars_hour` (
   `low` double unsigned DEFAULT NULL,
   `close` double unsigned DEFAULT NULL,
   `volume` int(11) unsigned DEFAULT NULL,
-  `market` boolean unsigned DEFAULT NULL,
+  `market` boolean DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `key` (`datetime`,`symbol_id`),
   KEY `datetime` (`datetime`),
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS `bars_day` (
   `low` double unsigned DEFAULT NULL,
   `close` double unsigned DEFAULT NULL,
   `volume` int(11) unsigned DEFAULT NULL,
-  `market` boolean unsigned DEFAULT NULL,
+  `market` boolean DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `key` (`datetime`,`symbol_id`),
   KEY `datetime` (`datetime`),
@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS `bars_week` (
   `low` double unsigned DEFAULT NULL,
   `close` double unsigned DEFAULT NULL,
   `volume` int(11) unsigned DEFAULT NULL,
+  `market` boolean DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `key` (`datetime`,`symbol_id`),
   KEY `datetime` (`datetime`),
@@ -191,6 +192,25 @@ CREATE TABLE IF NOT EXISTS  `opening` (
   KEY `datetime` (`datetime`),
   KEY `symbol_id` (`symbol_id`),
   CONSTRAINT `opening_symbol` FOREIGN KEY (`symbol_id`) REFERENCES `symbols` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+
+
+CREATE TABLE IF NOT EXISTS `events`
+(
+  `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
+  `datetime` datetime NOT NULL,
+  `symbol_id` int(11) unsigned NOT NULL,
+  `type` varchar(1) NOT NULL,
+  `unit` varchar(5) NOT NULL,
+  `count` int(2) unsigned NOT NULL,
+  `model` varchar(10) NOT NULL,
+  `validated` int(3) unsigned NOT NULL,
+  `proba` double unsigned DEFAULT NULL,
+  `group` varchar(6)  NOT NULL,
+  `description` varchar(15) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `events_pkey` (`datetime`,`symbol_id`,`type`,`model`),
+  CONSTRAINT `events_symbol` FOREIGN KEY (`symbol_id`) REFERENCES `symbols` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
 
 SET foreign_key_checks = 1;

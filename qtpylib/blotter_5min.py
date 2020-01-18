@@ -377,6 +377,7 @@ class Blotter():
     # -------------------------------------------
     def ibCallback(self, caller, msg, **kwargs):
 
+
         if caller == "handleConnectionClosed":
             self.log_blotter.info("Lost conncetion to Interactive Brokers...")
             self._on_exit(terminate=False)
@@ -388,6 +389,15 @@ class Blotter():
 
 
         elif caller == "handleHistoricalData":
+            if hasattr(msg, 'reqId'):
+
+                symbol = self.ibConn.tickerSymbol(msg.reqId)
+                if symbol not in [contract[0] for contract in self.contracts]:
+                    print("symbol %s is not followed in the list :"%symbol)
+                    print([contract[0] for contract in self.contracts])
+
+                    return
+
             self.on_ohlc_received(msg, kwargs)
 
         elif caller == "handleTickString":
@@ -482,6 +492,7 @@ class Blotter():
         symbol = self.ibConn.tickerSymbol(msg.reqId)
 
         if kwargs["completed"]:
+            self.backfilled  = True
             self.backfilled_symbols.append(symbol)
             tickers = set(
                 {v: k for k, v in self.ibConn.tickerIds.items() if v.upper() != "SYMBOL"}.keys())
@@ -496,14 +507,15 @@ class Blotter():
                 pass
 
         else:
+            timestamp =datetime.fromtimestamp(
+                int(msg.date)).replace(
+                tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
 
             data = {
                 "symbol": symbol,
                 "symbol_group": tools.gen_symbol_group(symbol),
                 "asset_class": tools.gen_asset_class(symbol),
-                "timestamp": tools.datetime_to_timezone(
-                    datetime.fromtimestamp(int(msg.date)), tz="UTC"
-                ).strftime("%Y-%m-%d %H:%M:%S"),
+                "timestamp": timestamp,
             }
 
             # incmoing second data
@@ -522,8 +534,9 @@ class Blotter():
                 data["close"] = tools.to_decimal(msg.close)
                 data["volume"] = int(msg.volume)
                 data["kind"] = "BAR"
-
-            # print(data)
+                data["historical"] = True
+                data["granularity"] = self.granularity
+                print(data)
 
             # store in db
             self.log2db(data, data["kind"])
@@ -896,6 +909,7 @@ class Blotter():
 
                 #contract_open +=  [contract]
 
+            """
             if granularity == "min" and len(contract_open)>0:
                 ### Send syncrone trigger for all contracts
                 bar = {}
@@ -910,7 +924,7 @@ class Blotter():
                 bar["kind"] = "BAR"
                 bar["granularity"] = granularity
                 self.broadcast(bar, "BAR")
-
+            """
             self.last_bar_datetime[granularity] = last_bar_datetime + self.bar_size[granularity]
             return True
         else:
@@ -1179,146 +1193,6 @@ class Blotter():
             sys.exit(1)
 
     # -------------------------------------------
-    # CLIENT / STATIC
-    # -------------------------------------------
-    def _fix_history_sequence(self, df, table):
-        """ fix out-of-sequence ticks/bars """
-
-        # remove "Unnamed: x" columns
-        cols = df.columns[df.columns.str.startswith('Unnamed:')].tolist()
-        df.drop(cols, axis=1, inplace=True)
-
-        # remove future dates
-        df['datetime'] = pd.to_datetime(df['datetime'], utc=True)
-        blacklist = df[df['datetime'] > pd.to_datetime('now', utc=True)]
-        df = df.loc[set(df.index) - set(blacklist)]  # .tail()
-
-        # loop through data, symbol by symbol
-        dfs = []
-        bad_ids = [blacklist['id'].values.tolist()]
-
-        for symbol_id in list(df['symbol_id'].unique()):
-
-            data = df[df['symbol_id'] == symbol_id].copy()
-
-            # sort by id
-            data.sort_values('id', axis=0, ascending=True, inplace=False)
-
-            # convert index to column
-            data.loc[:, "ix"] = data.index
-            data.reset_index(inplace=True)
-
-            # find out of sequence ticks/bars
-            malformed = data.shift(1)[(data['id'] > data['id'].shift(1)) & (
-                data['datetime'] < data['datetime'].shift(1))]
-
-            # cleanup rows
-            if malformed.empty:
-                # if all rows are in sequence, just remove last row
-                dfs.append(data)
-            else:
-                # remove out of sequence rows + last row from data
-                index = [
-                    x for x in data.index.values if x not in malformed['ix'].values]
-                dfs.append(data.loc[index])
-
-                # add to bad id list (to remove from db)
-                bad_ids.append(list(malformed['id'].values))
-
-        # combine all lists
-        data = pd.concat(dfs, sort=True)
-
-        # flatten bad ids
-        bad_ids = sum(bad_ids, [])
-
-        # remove bad ids from db
-        if bad_ids:
-            bad_ids = list(map(str, map(int, bad_ids)))
-            self.dbcurr.execute("DELETE FROM greeks WHERE %s IN (%s)" % (
-                table.lower()[:-1] + "_id", ",".join(bad_ids)))
-            self.dbcurr.execute("DELETE FROM " + table.lower() +
-                                " WHERE id IN (%s)" % (",".join(bad_ids)))
-            try:
-                self.dbconn.commit()
-            except Exception as e:
-                self.dbconn.rollback()
-
-        # return
-        return data.drop(['id', 'ix', 'index'], axis=1)
-
-    # -------------------------------------------
-    def history(self, symbols, start, end=None, resolution="1T", tz="UTC", continuous=True):
-        # load runtime/default data
-        if isinstance(symbols, str):
-            symbols = symbols.split(',')
-
-        # work with symbol groups
-        # symbols = list(map(tools.gen_symbol_group, symbols))
-        symbol_groups = list(map(tools.gen_symbol_group, symbols))
-        # print(symbols)
-
-        # convert datetime to string for MySQL
-        try:
-            start = start.strftime(
-                ibDataTypes["DATE_TIME_FORMAT_LONG_MILLISECS"])
-        except Exception as e:
-            pass
-
-        if end is not None:
-            try:
-                end = end.strftime(
-                    ibDataTypes["DATE_TIME_FORMAT_LONG_MILLISECS"])
-            except Exception as e:
-                pass
-
-        # connect to mysql
-        self.mysql_connect()
-
-        # --- build query
-        table = 'ticks' if resolution[-1] in ("K", "V", "S") else 'bars'
-
-        query = """SELECT tbl.*,
-            CONCAT(s.`symbol`, "_", s.`asset_class`) as symbol, s.symbol_group, s.asset_class, s.expiry,
-            g.price AS opt_price, g.underlying AS opt_underlying, g.dividend AS opt_dividend,
-            g.volume AS opt_volume, g.iv AS opt_iv, g.oi AS opt_oi,
-            g.delta AS opt_delta, g.gamma AS opt_gamma,
-            g.theta AS opt_theta, g.vega AS opt_vega
-            FROM `{TABLE}` tbl LEFT JOIN `symbols` s ON tbl.symbol_id = s.id
-            LEFT JOIN `greeks` g ON tbl.id = g.{TABLE_ID}
-            WHERE (`datetime` >= "{START}"{END_SQL}) """.replace(
-            '{START}', start).replace('{TABLE}', table).replace('{TABLE_ID}', table[:-1] + '_id')
-
-        if end is not None:
-            query = query.replace('{END_SQL}', ' AND `datetime` <= "{END}"')
-            query = query.replace('{END}', end)
-        else:
-            query = query.replace('{END_SQL}', '')
-
-        if symbols[0].strip() != "*":
-            if continuous:
-                query += """ AND ( s.`symbol_group` in ("{SYMBOL_GROUPS}") or
-                CONCAT(s.`symbol`, "_", s.`asset_class`) IN ("{SYMBOLS}") ) """
-                query = query.replace('{SYMBOLS}', '","'.join(symbols)).replace(
-                    '{SYMBOL_GROUPS}', '","'.join(symbol_groups))
-            else:
-                query += """ AND ( CONCAT(s.`symbol`, "_", s.`asset_class`) IN ("{SYMBOLS}") ) """
-                query = query.replace('{SYMBOLS}', '","'.join(symbols))
-        # --- end build query
-
-        # get data using pandas
-        data = pd.read_sql(query, self.dbconn)  # .dropna()
-
-        # no data in db
-        if data.empty:
-            return data
-
-        # clearup records that are out of sequence
-        data = self._fix_history_sequence(data, table)
-
-        # setup dataframe
-        return prepare_history(data=data, resolution=resolution, tz=tz, continuous=True)
-
-    # -------------------------------------------
     def stream(self, symbols, tick_handler=None, bar_handler=None,
                quote_handler=None, book_handler=None,contract_restriction=True):
         # load runtime/default data
@@ -1340,7 +1214,6 @@ class Blotter():
                     message = message.split(self.args["zmqtopic"])[1].strip()
                     data = json.loads(message)
                     # TODO : There is a lot of quote!!
-                    print(data['symbol'])
                     if contract_restriction and data['symbol'] not in symbols:
                         continue
 
@@ -1396,7 +1269,7 @@ class Blotter():
             sys.exit(1)
 
     # ---------------------------------------
-    def backfill(self, data, resolution, start, end=None):
+    def backfill(self, data, resolution, start, end=None, contract = []):
         """
         Backfills missing historical data
 
@@ -1423,11 +1296,11 @@ class Blotter():
 
         # missing history?
         start_date = parse_date(start)
-        end_date = parse_date(end) if end else datetime.utcnow()
+        end_date = parse_date(end) if end else datetime.now()
 
         if data.empty:
-            first_date = datetime.utcnow()
-            last_date = datetime.utcnow()
+            first_date = datetime.now()
+            last_date = datetime.now()
         else:
             first_date = tools.datetime64_to_datetime(data.index.values[0])
             last_date = tools.datetime64_to_datetime(data.index.values[-1])
@@ -1442,10 +1315,11 @@ class Blotter():
             self.backfilled = True
             return None
 
-        self.backfill_resolution = "1 min" if resolution[-1] not in (
-            "K", "V", "S") else "1 sec"
+        self.backfill_resolution = "1 hour" if resolution[-1] not in (
+            "K", "V", "S") else "5 min"
         self.log_blotter.warning("Backfilling historical data from IB...")
-
+        self.granularity = "hour" if resolution[-1] not in (
+            "K", "V", "S") else "min"
         # request parameters
         params = {
             "lookback": ib_lookback,
@@ -1455,9 +1329,12 @@ class Blotter():
             "end_datetime": None,
             "csv_path": None
         }
-
+        print(params)
         # if connection is active - request data
-        self.ibConn.requestHistoricalData(**params)
+        if len(contract)>0:
+            self.ibConn.requestHistoricalData(contracts = contract,**params)
+        else: # Request  history for all contract created
+            self.ibConn.requestHistoricalData(**params)
 
         # wait for backfill to complete
         while not self.backfilled:
@@ -1770,9 +1647,33 @@ def mysql_insert_bar(data, symbol_id, dbcurr):
         WHERE id = ( SELECT MAX(id) FROM bars_{granularity} WHERE symbol_id='{symbol_id}' AND datetime<'{datetime}')
         ON DUPLICATE KEY UPDATE market=TRUE;
         """.format(symbol_id=symbol_id, datetime=data["timestamp"], granularity = data['granularity'])
-        #print(sql)
         #print("bars_%s"%granularity)
         dbcurr.execute(sql)
+
+    elif "historical" in data and data["historical"]:
+
+        #dbcurr.execute("""SELECT 1 FROM bars_%s WHERE datetime = '%s' AND symbol_id = '%s'"""%(data['granularity'],data["timestamp"], symbol_id))
+        #bar_exist = dbcurr.fetchone()
+        #print("bar_exist :")
+        #print(bar_exist)
+        #if bar_exist is None:
+        #    sql = """INSERT IGNORE INTO bars_{granularity} (datetime, symbol_id,open,high,low,close,volume)
+        #    SELECT '{datetime}', symbol_id,close,close,close,close,0 FROM bars_{granularity}
+        #    WHERE id = ( SELECT MAX(id) FROM bars_{granularity} WHERE symbol_id={symbol_id} AND datetime<{datetime});
+        #    """.format(symbol_id=symbol_id, datetime=data["timestamp"], granularity = data['granularity'])
+
+        # Insert last row at timestamp, volume 0
+        sql = """INSERT IGNORE INTO `{}`
+            (`datetime`, `symbol_id`, `open`, `high`, `low`, `close`, `volume`, `market`)
+                VALUES (%s, %s, %s, %s, %s, %s, %s,%s)
+            ON DUPLICATE KEY UPDATE
+                 `market`=TRUE;
+        """
+                #print("bars_%s"%granularity)
+        dbcurr.execute(sql.format("bars_%s"%data['granularity']), ( data["timestamp"], symbol_id,
+                             float(data["open"]), float(data["high"]), float(
+                                 data["low"]), float(data["close"]), int(data["volume"]), True
+            ))
 
     else :
 
@@ -1838,43 +1739,6 @@ def mysql_insert_opening(data, symbol_id, dbcurr):
             #print(granularity)
             #print("bars_%s"%granularity)
             dbcurr.execute(sql, (datetime, symbol_id, h_open, h_close, h_open, h_close))
-# -------------------------------------------
-
-
-def prepare_history(data, resolution="1T", tz="UTC", continuous=True):
-
-    # setup dataframe
-    data.set_index('datetime', inplace=True)
-    data.index = pd.to_datetime(data.index, utc=True)
-    data['expiry'] = pd.to_datetime(data['expiry'], utc=True)
-
-    # remove _STK from symbol to match ezIBpy's formatting
-    data['symbol'] = data['symbol'].str.replace("_STK", "")
-
-    # force options columns
-    data = tools.force_options_columns(data)
-
-    # construct continuous contracts for futures
-    if continuous and resolution[-1] not in ("K", "V", "S"):
-        all_dfs = [data[data['asset_class'] != 'FUT']]
-
-        # generate dict of df per future
-        futures_symbol_groups = list(
-            data[data['asset_clasmaxs'] == 'FUT']['symbol_group'].unique())
-        for key in futures_symbol_groups:
-            future_group = data[data['symbol_group'] == key]
-            continuous = futures.create_continuous_contract(
-                future_group, resolution)
-            all_dfs.append(continuous)
-
-        # make one df again
-        # data = pd.concat(all_dfs, sort=True)
-        data['datetime'] = data.index
-        data.groupby([data.index, 'symbol'], as_index=False
-                     ).last().set_index('datetime').dropna()
-
-    data = tools.resample(data, resolution, tz)
-    return data
 
 
 # -------------------------------------------

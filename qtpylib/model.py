@@ -26,6 +26,9 @@ import logging
 import os
 import ezibpy
 import pymysql
+import time
+import json
+
 from multiprocessing import Pool, cpu_count
 
 from datetime import datetime
@@ -36,7 +39,6 @@ from numpy import nan
 
 from qtpylib.broker import Broker
 from qtpylib.workflow import validate_columns as validate_csv_columns
-from qtpylib.blotter_5min import prepare_history
 from qtpylib import (
     tools, sms, asynctools
 )
@@ -44,6 +46,9 @@ from qtpylib.instrument import Instrument
 
 from qtpylib.blotter_5min import (
     Blotter, load_blotter_args, get_symbol_id
+)
+from ezibpy import (
+    ezIBpy, dataTypes as ibDataTypes
 )
 # =============================================
 # check min, python version
@@ -62,8 +67,7 @@ asynctools.multitasking.createPool(__name__, __threads__)
 
 # =============================================
 
-
-class Model():
+class Model(Broker):
     """Model class initilizer
 
     :Parameters:
@@ -96,19 +100,32 @@ class Model():
             Path to the directory with QTPyLib-compatible CSV files (Backtest)
         output: str
             Path to save the recorded data (default: None)
-
+        zmqport : str
+            ZeroMQ Port to use (default: 12345)
+        zmqtopic : str
+            ZeroMQ string to use (default: _qtpylib_BLOTTERNAME_)
     """
 
     __metaclass__ = ABCMeta
 
-    def __init__(self, instruments=None, resolution="5T",
-                 tick_window=1, bar_window=100, preload=None,
+    def __init__(self, instruments=None, resolution="1B",
+                 tick_window=1, bar_window=150, preload=None,
                  blotter=None, sms=None, log=None,
                  backtest=False, start=None, end=None, data=None, output=None,
+                 ibclient=998, ibport=4001, ibserver=None,freshstart=0,
+                 zmqport="12345", zmqtopic=None
                  **kwargs):
 
         # detect algo name
         self.name = str(self.__class__).split('.')[-1].split("'")[0]
+        name = tools.read_single_argv("--name")
+        if name is not None:
+            self.name = name
+        print("name is : %s"%self.name )
+
+        if zmqtopic is None:
+            zmqtopic = "_qtpylib_" + str(self.name.lower()) + "_"
+        print("zmqtopic is : %s"%zmqtopic)
 
         # initilize algo logger
         self.log_algo = logging.getLogger(__name__)
@@ -122,11 +139,10 @@ class Model():
         ) if arg not in ('__class__', 'self', 'kwargs')}
         self.args.update(kwargs)
         self.args.update(self.load_cli_args())
+        print(self.args)
 
         # -----------------------------------
         # assign algo params
-        self.bars = pd.DataFrame()
-        self.ticks = pd.DataFrame()
         self.quotes = {}
         self.books = {}
         self.tick_count = 0
@@ -137,7 +153,7 @@ class Model():
         self.tick_window = tick_window if tick_window > 0 else 1
         if "V" in resolution:
             self.tick_window = 1000
-        self.bar_window = bar_window if bar_window > 0 else 100
+        self.bar_window = bar_window if bar_window > 0 else 150
         self.resolution = resolution.upper().replace("MIN", "T")
         self.preload = preload
 
@@ -159,51 +175,29 @@ class Model():
         self.dbcurr = None
         self.dbconn = None
 
+        self.duplicate_run = False
+        self.args_cache_file = "%s/%s.qtpylib" % (
+            tempfile.gettempdir(), self.name)
+        if os.path.exists(self.args_cache_file):
+            self.cahced_args = self._read_cached_args()
+
         # -----------------------------------
-        # load blotter settings
-        self.blotter_args = load_blotter_args(
-            self.blotter_name, logger=self.log_algo)
-
-        print(self.blotter_args)
-        self.blotter = Blotter(**self.blotter_args)
-
-        # connect to mysql using blotter's settings
-        if not self.blotter_args['dbskip']:
-            self.dbconn = pymysql.connect(
-                host=str(self.blotter_args['dbhost']),
-                port=int(self.blotter_args['dbport']),
-                user=str(self.blotter_args['dbuser']),
-                passwd=str(self.blotter_args['dbpass']),
-                db=str(self.blotter_args['dbname']),
-                autocommit=True
-            )
-            self.dbcurr = self.dbconn.cursor()
-        # create contracts
-        instrument_tuples_dict = {}
-        if not instruments:
-            df = pd.read_csv(self.blotter_args['symbols'], header=0)
-            instruments = [tuple(x) for x in df[['symbol', 'sec_type', 'exchange',
-                                  'currency', 'expiry', 'strike', 'opt_type']].values]
+        # initiate broker/order manager
+        print(self.args.items())
+        super().__init__(instruments, **{
+            arg: val for arg, val in self.args.items() if arg in (
+                'ibport', 'ibclient', 'ibserver')})
 
 
-        for instrument in instruments:
-            try:
-                if isinstance(instrument, ezibpy.utils.Contract):
-                    instrument = self.ibConn.contract_to_tuple(instrument)
-                else:
-                    instrument = tools.create_ib_tuple(instrument)
-                contractString = self.ibConn.contractString(instrument)
-                instrument_tuples_dict[contractString] = instrument
-                self.ibConn.createContract(instrument)
-            except Exception as e:
-                pass
-
-
-        self.instruments = instrument_tuples_dict
-        self.symbols = list(self.instruments.keys())
         print("symbols are : %s"%self.symbols  )
         # -----------------------------------
+        # tunnel threshold
+        self.tunnel_threshold = {}
+        for sym in self.symbols:
+            self.tunnel_threshold[sym] = {}
+        # -----------------------------------
         # signal collector
+
         self.signals = {}
         for sym in self.symbols:
             self.signals[sym] = pd.DataFrame()
@@ -218,7 +212,8 @@ class Model():
         # ---------------------------------------
         # be aware of thread count
         self.threads = asynctools.multitasking.getPool(__name__)['threads']
-
+        print("Number of threads :")
+        print(self.threads)
     # ---------------------------------------
     def load_cli_args(self):
         """
@@ -246,6 +241,14 @@ class Model():
         parser.add_argument('--blotter',
                             help='Log trades to this Blotter\'s MySQL')
 
+        parser.add_argument('--ibport', default=self.args["ibport"],
+                            help='IB TWS/GW Port', type=int)
+        parser.add_argument('--ibclient', default=self.args["ibclient"],
+                            help='IB TWS/GW Client ID', type=int)
+        parser.add_argument('--ibserver', default=self.args["ibserver"],
+                            help='IB TWS/GW Server hostname')
+        parser.add_argument('--freshstart', default=self.args["freshstart"],
+                    help='Try to load previous state of model or recompute it at starting')
 
         # only return non-default cmd line args
         # (meaning only those actually given)
@@ -263,75 +266,93 @@ class Model():
         ``on_bar`` methods.
         """
 
-        history = pd.DataFrame()
-        # optimize pandas
-        if not history.empty:
-            history['symbol'] = history['symbol'].astype('category')
-            history['symbol_group'] = history['symbol_group'].astype('category')
-            history['asset_class'] = history['asset_class'].astype('category')
-
-
-        # place history self.bars
-        self.bars = history
+        self._check_unique_model()
 
         # add instruments to blotter in case they do not exist
-        self.blotter.register(self.instruments)
+        #self.blotter.register(self.instruments)
         self.symbol_ids = {symbol : get_symbol_id(symbol, self.dbconn, self.dbcurr) for symbol in self.symbols}
         print("self.symbol_ids : ")
         print(self.symbol_ids)
 
+
+        """
+        # Data check
+        start = tools.backdate(self.preload)
+        end =  tools.backdate(self.resolution)
+        print("Start date is :%s"%start)
+        print("End date is :%s"%end)
+
+        self.blotter.ibConn = self.ibConn
+
+        # call the back fill
+        for (_,instrument) in self.instruments.items():
+            contract = self.ibConn.createContract(instrument)
+            self.blotter.backfill(data=pd.DataFrame(),
+                                  resolution=self.resolution,
+                                  start=start, end=end, contract = [contract])
+
+        print("++++++++ END OF BACKFILL ++++++++")
+        self.blotter.ibConn = None
+        """
         # initiate strategy
         self.on_start()
         # listen for RT data
-        self._bar_handler({'cron':True, 'kind' : 'BAR', 'symbol':  ['ALXN','ALGN','AMGN']})
-
+        #self._bar_handler({'cron':True, 'kind' : 'BAR', 'symbol':  ['ALXN','ALGN','AMGN']})
         """
+        for symbol in ['FFP','RMS'] :
+            self._bar_handler({"symbol":symbol, "type" : "BAR", 'timestamp':"2020-01-13 15:00:00"})
+        """
+
         self.blotter.stream(
             symbols=self.symbols,
             tick_handler=self._tick_handler,
             bar_handler=self._bar_handler,
             contract_restriction=False
         )
-        """
+
 
     @asynctools.multitasking.task
     def _tick_handler(self, tick, stale_tick=False):
+        self.on_tick(tick)
 
-        # tick symbol
-        symbol = tick['symbol']
-        print("symbol in _tick_handler ")
-        print("Received at %s"%datetime.now())
-    # ---------------------------------------
+    @asynctools.multitasking.task
     def _bar_handler(self, data):
+        self._base_bar_handler(data)
+
+    @asynctools.multitasking.task
+    def _on_tunnel(self, instrument):
+        self.on_tunnel(instrument)
+    # --------------------------------------
+    @asynctools.multitasking.task
+    def _base_bar_handler(self, data):
         """ non threaded bar handler (called by threaded _tick_handler) """
         # bar symbol
-        print(self.model)
-        if 'cron' in data and data['cron']:
-            print("Received at %s"%datetime.now())
-            print('Bra created at %s'%data[''])
-            last_bar_datetime = data['timestamp']
-            #contract_open = ",".join([str(self.symbol_ids[contrat]) for contrat in contract_open])
+        if (data['granularity'] != 'hour') or ('cron' in data) :
+            return
 
-            bars_to_process = []
 
-            for contrat in contract_open:
-                req = """SELECT datetime, open, high, close, low, volume, symbol_id FROM bars_hour WHERE symbol_id=%s ORDER BY datetime DESC LIMIT %s"""
-                bars = pd.read_sql(req%(self.symbol_ids[contrat], self.bar_window),self.dbconn)
+        print("Received at %s"%datetime.now())
+        last_bar_datetime =  datetime.strptime(data['timestamp'],
+            "%Y-%m-%d %H:%M:%S")
+        contrat = data['symbol']
+        #contract_open = ",".join([str(self.symbol_ids[contrat]) for contrat in contract_open])
 
-                bars_to_process += [(contrat, bars)]
+        req = """SELECT datetime, open, high, close, low, volume, symbol_id FROM bars_hour WHERE symbol_id=%s ORDER BY datetime DESC LIMIT %s"""
 
-            pool = Pool(2) # from pathos, Poll for multiprocessing. multiprocessing cannot pickle inside function main
+        if self.threads > 0:
+            dbconn = self.get_mysql_connection()
+        else:
+            dbconn = self.dbconn
 
-            dataset = pd.concat(pool.map(self.on_bar, bars_to_process),
-                                    ignore_index=True, axis=0)
+        if contrat not in self.symbol_ids:
+            print('Contrat %s not in self.symbol_ids'%contrat)
+            self.tunnel_threshold[contrat] = {}
+            return
 
-            print(dataset)
-            # inference
-            y_pred = self.model.predict(dataset)
-            proba = self.model.predict_proba(dataset)[:,1]
-            print(proba)
-            pool.close()
+        bars = pd.read_sql(req%(self.symbol_ids[contrat], 150), dbconn)
 
+        bars.sort_values('datetime',inplace=True)
+        self.on_bar(contrat, bars, last_bar_datetime)
 
 
 
@@ -598,3 +619,96 @@ class Model():
     def __setstate__(self, state):
         """ This is called while unpickling. """
         self.__dict__.update(state)
+
+
+    def get_mysql_connection(self):
+        return pymysql.connect(
+            host=str(self.blotter_args['dbhost']),
+            port=int(self.blotter_args['dbport']),
+            user=str(self.blotter_args['dbuser']),
+            passwd=str(self.blotter_args['dbpass']),
+            db=str(self.blotter_args['dbname'])
+        )
+
+
+    # -------------------------------------------
+    @staticmethod
+    def _model_file_running():
+        try:
+            # not sure how this works on windows...
+            command = 'pgrep -f ' + sys.argv[0]
+            print(command)
+            process = subprocess.Popen(
+                command, shell=True, stdout=subprocess.PIPE)
+            stdout_list = process.communicate()[0].decode('utf-8').split("\n")
+            stdout_list = list(filter(None, stdout_list))
+            print(sdout_list)
+            return len(stdout_list) > 0
+        except Exception as e:
+            return False
+
+    # -------------------------------------------
+    @staticmethod
+    def _model_file_running():
+        try:
+            # not sure how this works on windows...
+            command = 'pgrep -f ' + sys.argv[0]
+            print(command)
+            process = subprocess.Popen(
+                command, shell=True, stdout=subprocess.PIPE)
+            stdout_list = process.communicate()[0].decode('utf-8').split("\n")
+            stdout_list = list(filter(None, stdout_list))
+            print(sdout_list)
+            return len(stdout_list) > 0
+        except Exception as e:
+            return False
+
+    # -------------------------------------------
+    def _check_unique_model(self):
+        if os.path.exists(self.args_cache_file):
+            # temp file found - check if really running
+            # or if this file wasn't deleted due to crash
+            if not self._model_file_running():
+                # print("REMOVING OLD TEMP")
+                self._remove_cached_args()
+            else:
+                self.duplicate_run = True
+                self.log_blotter.error("Model is already running...")
+                sys.exit(1)
+
+        self._write_cached_args()
+
+    # -------------------------------------------
+    def _remove_cached_args(self):
+        if os.path.exists(self.args_cache_file):
+            os.remove(self.args_cache_file)
+
+    def _read_cached_args(self):
+        if os.path.exists(self.args_cache_file):
+            return pickle.load(open(self.args_cache_file, "rb"))
+        return {}
+
+    def _write_cached_args(self):
+        pickle.dump(self.args, open(self.args_cache_file, "wb"))
+        tools.chmod(self.args_cache_file)
+
+    # -------------------------------------------
+    def broadcast(self, data, kind):
+        def int64_handler(o):
+            if isinstance(o, np_int64):
+                try:
+                    return pd.to_datetime(o, unit='ms').strftime(
+                        ibDataTypes["DATE_TIME_FORMAT_LONG"])
+                except Exception as e:
+                    return int(o)
+            raise TypeError
+
+        string2send = "%s %s" % (
+            self.args["zmqtopic"], json.dumps(data, default=int64_handler))
+
+        try:
+            self.socket.send_string(string2send)
+        except Exception as e:
+            print('Broadcast error : ')
+            print(e)
+            pass

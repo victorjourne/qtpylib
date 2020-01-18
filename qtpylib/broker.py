@@ -113,21 +113,38 @@ class Broker():
         # self.ibConnect()
 
         connection_tries = 0
-        while not self.ibConn.connected:
-            self.ibConn.connect(clientId=self.ibclient,
-                                port=self.ibport, host=self.ibserver)
-            time.sleep(1)
-            if not self.ibConn.connected:
-                # print('*', end="", flush=True)
-                connection_tries += 1
-                if connection_tries > 10:
-                    self.log_broker.info(
-                        "Cannot connect to Interactive Brokers...")
-                    sys.exit(0)
 
-        self.log_broker.info("Connection established...")
+        if not self.ibserver:
+            while not self.ibConn.connected:
+                self.ibConn.connect(clientId=self.ibclient,
+                                    port=self.ibport, host=self.ibserver)
+                time.sleep(1)
+                if not self.ibConn.connected:
+                    # print('*', end="", flush=True)
+                    connection_tries += 1
+                    if connection_tries > 10:
+                        self.log_broker.info(
+                            "Cannot connect to Interactive Brokers...")
+                        sys.exit(0)
+
+                        self.log_broker.info("Connection established...")
 
         # -----------------------------------
+        # load blotter settings
+        self.blotter_args = load_blotter_args(
+            self.blotter_name, logger=self.log_broker)
+        print(self.blotter_args)
+        self.blotter = Blotter(**self.blotter_args)
+
+        # -----------------------------------
+        # create contracts
+        instrument_tuples_dict = {}
+        if not instruments:
+            df = pd.read_csv(self.blotter_args['symbols'], header=0)
+            instruments = [tuple(x) for x in df[['symbol', 'sec_type', 'exchange',
+                                  'currency', 'expiry', 'strike', 'opt_type']].values]
+        # -----------------------------------
+        print(instruments)
         # create contracts
         instrument_tuples_dict = {}
         for instrument in instruments:
@@ -138,14 +155,17 @@ class Broker():
                     instrument = tools.create_ib_tuple(instrument)
                 contractString = self.ibConn.contractString(instrument)
                 instrument_tuples_dict[contractString] = instrument
+                print("Create contract %s for ezibpy class" %str(instrument))
                 self.ibConn.createContract(instrument)
             except Exception as e:
+                print(e)
                 pass
 
         self.instruments = instrument_tuples_dict
         self.symbols = list(self.instruments.keys())
         self.instrument_combos = {}
 
+        self.blotter.contracts = instruments
         # -----------------------------------
         # track orders & trades
         self.active_trades = {}
@@ -171,11 +191,6 @@ class Broker():
         self.dbcurr = None
         self.dbconn = None
 
-        # -----------------------------------
-        # load blotter settings
-        self.blotter_args = load_blotter_args(
-            self.blotter_name, logger=self.log_broker)
-        self.blotter = Blotter(**self.blotter_args)
 
         # connect to mysql using blotter's settings
         if not self.blotter_args['dbskip']:
