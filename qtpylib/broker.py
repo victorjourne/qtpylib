@@ -113,8 +113,8 @@ class Broker():
         # self.ibConnect()
 
         connection_tries = 0
-
-        if not self.ibserver:
+        #import pdb; pdb.set_trace()
+        if self.ibserver and self.ibserver != 'None':
             while not self.ibConn.connected:
                 self.ibConn.connect(clientId=self.ibclient,
                                     port=self.ibport, host=self.ibserver)
@@ -133,8 +133,10 @@ class Broker():
         # load blotter settings
         self.blotter_args = load_blotter_args(
             self.blotter_name, logger=self.log_broker)
-        print(self.blotter_args)
+        #print('Blotter args : ')
+        #print(self.blotter_args)
         self.blotter = Blotter(**self.blotter_args)
+        #print('Blotter args after instanciation: ')
 
         # -----------------------------------
         # create contracts

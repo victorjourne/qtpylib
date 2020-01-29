@@ -38,9 +38,11 @@ path = {
 __all__ = [
     'blotter',
     'algo',
+    'model',
     'broker',
     'tools',
     'sms',
+    'slack_api',
     'indicators',
     'talib_indicators',
     'futures',

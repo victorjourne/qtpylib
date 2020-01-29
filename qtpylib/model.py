@@ -18,7 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
+import tempfile, pickle
 import argparse
 import inspect
 import sys
@@ -28,6 +28,8 @@ import ezibpy
 import pymysql
 import time
 import json
+import zmq
+import re
 
 from multiprocessing import Pool, cpu_count
 
@@ -40,7 +42,7 @@ from numpy import nan
 from qtpylib.broker import Broker
 from qtpylib.workflow import validate_columns as validate_csv_columns
 from qtpylib import (
-    tools, sms, asynctools
+    tools, sms, asynctools, slack_api
 )
 from qtpylib.instrument import Instrument
 
@@ -49,6 +51,11 @@ from qtpylib.blotter_5min import (
 )
 from ezibpy import (
     ezIBpy, dataTypes as ibDataTypes
+)
+from numpy import (
+    isnan as np_isnan,
+    nan as np_nan,
+    int64 as np_int64
 )
 # =============================================
 # check min, python version
@@ -88,6 +95,8 @@ class Model(Broker):
             Log events to this Blotter's MySQL (default is "auto detect")
         sms: set
             List of numbers to text orders (default: None)
+        slack: bool
+            Whether to send slack message  (default: False)
         log: str
             Path to store event data (default: None)
         backtest: bool
@@ -104,16 +113,18 @@ class Model(Broker):
             ZeroMQ Port to use (default: 12345)
         zmqtopic : str
             ZeroMQ string to use (default: _qtpylib_BLOTTERNAME_)
+        appurl : str
+                URL of app vizualisation
     """
 
     __metaclass__ = ABCMeta
 
-    def __init__(self, instruments=None, resolution="1B",
+    def __init__(self, instruments=None, resolution="1H",
                  tick_window=1, bar_window=150, preload=None,
-                 blotter=None, sms=None, log=None,
+                 blotter=None, sms=None, slack=False, log=None,
                  backtest=False, start=None, end=None, data=None, output=None,
                  ibclient=998, ibport=4001, ibserver=None,freshstart=0,
-                 zmqport="12345", zmqtopic=None
+                 zmqport=None, zmqtopic=None,market=None,appurl='',
                  **kwargs):
 
         # detect algo name
@@ -123,8 +134,12 @@ class Model(Broker):
             self.name = name
         print("name is : %s"%self.name )
 
+        self.market = tools.read_single_argv("--market")
+        if market is not None:
+            self.market = market
+
         if zmqtopic is None:
-            zmqtopic = "_qtpylib_" + str(self.name.lower()) + "_"
+            zmqtopic = "_qtpylib_" + str(self.market.lower()) + "_"
         print("zmqtopic is : %s"%zmqtopic)
 
         # initilize algo logger
@@ -139,7 +154,6 @@ class Model(Broker):
         ) if arg not in ('__class__', 'self', 'kwargs')}
         self.args.update(kwargs)
         self.args.update(self.load_cli_args())
-        print(self.args)
 
         # -----------------------------------
         # assign algo params
@@ -153,7 +167,7 @@ class Model(Broker):
         self.tick_window = tick_window if tick_window > 0 else 1
         if "V" in resolution:
             self.tick_window = 1000
-        self.bar_window = bar_window if bar_window > 0 else 150
+        self.bar_window = [bar_window if bar_window > 0 else 150]
         self.resolution = resolution.upper().replace("MIN", "T")
         self.preload = preload
 
@@ -183,7 +197,7 @@ class Model(Broker):
 
         # -----------------------------------
         # initiate broker/order manager
-        print(self.args.items())
+        print(self.args)
         super().__init__(instruments, **{
             arg: val for arg, val in self.args.items() if arg in (
                 'ibport', 'ibclient', 'ibserver')})
@@ -214,6 +228,13 @@ class Model(Broker):
         self.threads = asynctools.multitasking.getPool(__name__)['threads']
         print("Number of threads :")
         print(self.threads)
+
+        print('App URL : %s'%self.args['appurl'])
+        print(self.blotter_args)
+
+
+        self.symbol_ids = {symbol : get_symbol_id(symbol, self.dbconn, self.dbcurr) for symbol in self.symbols}
+
     # ---------------------------------------
     def load_cli_args(self):
         """
@@ -228,6 +249,8 @@ class Model(Broker):
 
         parser.add_argument('--sms', default=self.args["sms"],
                             help='Numbers to text orders', nargs='+')
+        parser.add_argument('--slack', default=self.args["slack"],action='store_true',
+                            help='Send to slack')
         parser.add_argument('--log', default=self.args["log"],
                             help='Path to store trade data')
         parser.add_argument('--start', default=self.args["start"],
@@ -240,15 +263,18 @@ class Model(Broker):
                             help='Path to save the recorded data')
         parser.add_argument('--blotter',
                             help='Log trades to this Blotter\'s MySQL')
-
         parser.add_argument('--ibport', default=self.args["ibport"],
                             help='IB TWS/GW Port', type=int)
         parser.add_argument('--ibclient', default=self.args["ibclient"],
                             help='IB TWS/GW Client ID', type=int)
         parser.add_argument('--ibserver', default=self.args["ibserver"],
                             help='IB TWS/GW Server hostname')
+        parser.add_argument('--zmqport', default=self.args['zmqport'],
+                                help='ZeroMQ Port to use', required=False)
         parser.add_argument('--freshstart', default=self.args["freshstart"],
                     help='Try to load previous state of model or recompute it at starting')
+        parser.add_argument('--appurl', default='',
+                help='URL of viz app (http://ip:port)')
 
         # only return non-default cmd line args
         # (meaning only those actually given)
@@ -258,6 +284,71 @@ class Model(Broker):
         return args
 
     # ---------------------------------------
+    def initiate_socket(self):
+
+        self.context = zmq.Context(zmq.REP)
+        self.socket = self.context.socket(zmq.PUB)
+        print("PUB to port %s"%self.args['zmqport'])
+        self.socket.bind("tcp://*:" + str(self.args['zmqport']))
+
+    # ---------------------------------------
+
+    def get_history(self, symbol, granularity, window):
+        req = """SELECT datetime, open, high, close, low, volume, symbol_id FROM bars_%s WHERE symbol_id=%s ORDER BY datetime DESC LIMIT %s"""
+
+        if self.threads > 0:
+            dbconn = self.get_mysql_connection()
+        else:
+            dbconn = self.dbconn
+
+        if symbol not in self.symbol_ids:
+            print('Contrat %s not in self.symbol_ids'%symbol)
+            self.tunnel_threshold[symbol] = {}
+            return
+
+        bars = pd.read_sql(req%(granularity, self.symbol_ids[symbol], window), dbconn)
+
+        bars.sort_values('datetime',inplace=True)
+
+        if self.threads > 0:
+            dbconn.close()
+
+        return bars
+
+    def fill_db(self):
+
+
+        if self.ibserver:
+            self.blotter.ibConn = self.ibConn
+            # call the back fill
+            print("++++++++ START OF BACKFILL ++++++++")
+            #self.preload = ['21W','21D']#,'150H','1T']
+            for (_,instrument) in self.instruments.items():
+                contract = self.ibConn.createContract(instrument)
+                print('***** Contract %s '% str(instrument))
+                for preload in self.preload:
+                    # Data check
+                    start = tools.backdate(preload)
+                    end =  None
+                    print("Start date is :%s"%start)
+                    print("End date is :%s"%end)
+                    temp = re.compile("([0-9]+)([a-zA-Z]+)")
+                    res = temp.match(preload).groups()
+                    print(res[0], res[1])
+                    ib_dic =  dict(W='week',D='day',H='hour',T="min")
+                    granularity = ib_dic[res[1]]
+                    window = res[0]
+                    #bars = self.get_history(instrument[0], granularity, 2*window)
+                    #bars = bars.set_index('datetime')
+                    self.blotter.backfill(data=pd.DataFrame(),
+                                          resolution=preload,
+                                          start=start, end=end, contract = [contract])
+                    time.sleep(10)
+
+            print("++++++++ END OF BACKFILL ++++++++")
+            self.blotter.ibConn = None
+
+
     def run(self):
         """Starts the algo
 
@@ -265,37 +356,18 @@ class Model(Broker):
         tick data to the ``on_tick`` function and bar data to the
         ``on_bar`` methods.
         """
-
-        self._check_unique_model()
-
+        print('RUN')
+        #self._check_unique_model()
+        self.initiate_socket()
         # add instruments to blotter in case they do not exist
         #self.blotter.register(self.instruments)
         self.symbol_ids = {symbol : get_symbol_id(symbol, self.dbconn, self.dbcurr) for symbol in self.symbols}
-        print("self.symbol_ids : ")
-        print(self.symbol_ids)
 
-
-        """
-        # Data check
-        start = tools.backdate(self.preload)
-        end =  tools.backdate(self.resolution)
-        print("Start date is :%s"%start)
-        print("End date is :%s"%end)
-
-        self.blotter.ibConn = self.ibConn
-
-        # call the back fill
-        for (_,instrument) in self.instruments.items():
-            contract = self.ibConn.createContract(instrument)
-            self.blotter.backfill(data=pd.DataFrame(),
-                                  resolution=self.resolution,
-                                  start=start, end=end, contract = [contract])
-
-        print("++++++++ END OF BACKFILL ++++++++")
-        self.blotter.ibConn = None
-        """
         # initiate strategy
         self.on_start()
+        print('On start finished')
+
+
         # listen for RT data
         #self._bar_handler({'cron':True, 'kind' : 'BAR', 'symbol':  ['ALXN','ALGN','AMGN']})
         """
@@ -303,13 +375,17 @@ class Model(Broker):
             self._bar_handler({"symbol":symbol, "type" : "BAR", 'timestamp':"2020-01-13 15:00:00"})
         """
 
+        zmqport_list = range(int(self.blotter.args['zmqport']),int(self.args['zmqport']))
+        print(zmqport_list)
         self.blotter.stream(
             symbols=self.symbols,
             tick_handler=self._tick_handler,
             bar_handler=self._bar_handler,
-            contract_restriction=False
+            tunnel_handler=self._tunnel_handler,
+            overshoot_handler = self._overshoot_handler,
+            contract_restriction=True,
+            zmqport_list = zmqport_list
         )
-
 
     @asynctools.multitasking.task
     def _tick_handler(self, tick, stale_tick=False):
@@ -320,12 +396,36 @@ class Model(Broker):
         self._base_bar_handler(data)
 
     @asynctools.multitasking.task
-    def _on_tunnel(self, instrument):
-        self.on_tunnel(instrument)
-    # --------------------------------------
+    def _tunnel_handler(self, data):
+        if data['type'] == "H":
+            self.on_tunnel(data)
+        elif data['type'] == "B":
+            self.on_tunnel_out(data)
+
     @asynctools.multitasking.task
+    def _overshoot_handler(self, data):
+        self.on_overshoot(data)
+
+    # ---------------------------------------
+    @abstractmethod
+    def on_overshoot(self):
+        raise NotImplementedError("Should implement on_overshoot()")
+        pass
+    # ---------------------------------------
+    @abstractmethod
+    def on_tunnel(self):
+        raise NotImplementedError("Should implement on_tunnel()")
+        pass
+    # ---------------------------------------
+    @abstractmethod
+    def on_tunnel_out(self):
+        raise NotImplementedError("Should implement on_tunnel_out()")
+        pass
+
+    # --------------------------------------
+
     def _base_bar_handler(self, data):
-        """ non threaded bar handler (called by threaded _tick_handler) """
+        """ non threaded bar handler (called by threaded _bar_handler) """
         # bar symbol
         if (data['granularity'] != 'hour') or ('cron' in data) :
             return
@@ -334,27 +434,12 @@ class Model(Broker):
         print("Received at %s"%datetime.now())
         last_bar_datetime =  datetime.strptime(data['timestamp'],
             "%Y-%m-%d %H:%M:%S")
-        contrat = data['symbol']
+        symbol = data['symbol']
         #contract_open = ",".join([str(self.symbol_ids[contrat]) for contrat in contract_open])
 
-        req = """SELECT datetime, open, high, close, low, volume, symbol_id FROM bars_hour WHERE symbol_id=%s ORDER BY datetime DESC LIMIT %s"""
-
-        if self.threads > 0:
-            dbconn = self.get_mysql_connection()
-        else:
-            dbconn = self.dbconn
-
-        if contrat not in self.symbol_ids:
-            print('Contrat %s not in self.symbol_ids'%contrat)
-            self.tunnel_threshold[contrat] = {}
-            return
-
-        bars = pd.read_sql(req%(self.symbol_ids[contrat], 150), dbconn)
-
-        bars.sort_values('datetime',inplace=True)
-        self.on_bar(contrat, bars, last_bar_datetime)
-
-
+        bars = self.get_history(symbol, 'hour', 150)
+        if (bars is not None) and (not bars.empty):
+            self.on_bar(symbol, bars, last_bar_datetime)
 
     # ---------------------------------------
     @abstractmethod
@@ -415,35 +500,6 @@ class Model(Broker):
         # raise NotImplementedError("Should implement on_bar()")
         pass
 
-
-    # ---------------------------------------
-    def get_history(self, symbols, start, end=None, resolution="1T", tz="UTC"):
-        """Get historical market data.
-        Connects to Blotter and gets historical data from storage
-
-        :Parameters:
-            symbols : list
-                List of symbols to fetch history for
-            start : datetime / string
-                History time period start date
-                datetime or YYYY-MM-DD[ HH:MM[:SS]] string)
-
-        :Optional:
-            end : datetime / string
-                History time period end date
-                (datetime or YYYY-MM-DD[ HH:MM[:SS]] string)
-            resolution : string
-                History resoluton (Pandas resample, defaults to 1T/1min)
-            tz : string
-                History timezone (defaults to UTC)
-
-        :Returns:
-            history : pd.DataFrame
-                Pandas DataFrame object with historical data for all symbols
-        """
-        return self.blotter.history(symbols, start, end, resolution, tz)
-
-
     # ---------------------------------------
     def record(self, *args, **kwargs):
         """Records data for later analysis.
@@ -481,6 +537,7 @@ class Model(Broker):
         """
         logging.info("SMS: %s", str(text))
         sms.send_text(self.name + ': ' + str(text), self.sms_numbers)
+
 
     # ---------------------------------------
     @staticmethod
@@ -692,23 +749,30 @@ class Model(Broker):
         pickle.dump(self.args, open(self.args_cache_file, "wb"))
         tools.chmod(self.args_cache_file)
 
-    # -------------------------------------------
+
+    # ----------------------------------------------
     def broadcast(self, data, kind):
-        def int64_handler(o):
-            if isinstance(o, np_int64):
-                try:
-                    return pd.to_datetime(o, unit='ms').strftime(
-                        ibDataTypes["DATE_TIME_FORMAT_LONG"])
-                except Exception as e:
-                    return int(o)
-            raise TypeError
 
         string2send = "%s %s" % (
-            self.args["zmqtopic"], json.dumps(data, default=int64_handler))
-
+            self.args["zmqtopic"], json.dumps(data, cls=tools.MyEncoder))
+        print(string2send)
         try:
             self.socket.send_string(string2send)
         except Exception as e:
             print('Broadcast error : ')
             print(e)
             pass
+
+    # ---------------------------------------
+    def slack(self, text, channel):
+        """Sends an SMS message.
+        Slack section of the documentation for more information about this)
+
+
+        :Parameters:
+            tunnel : text
+                The body of the Slack message to send
+
+        """
+        logging.info("Slack: %s", str(text))
+        slack_api.send_text(text, channel)

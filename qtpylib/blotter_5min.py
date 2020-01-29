@@ -142,8 +142,8 @@ class Blotter():
                  zmqport="12345", zmqtopic=None,barsize=1, **kwargs):
 
         # whats my name?
-        self.name = str(self.__class__).split('.')[-1].split("'")[0].lower()
-        name = tools.read_single_argv("--name")
+        #self.name = str(self.__class__).split('.')[-1].split("'")[0].lower()
+        self.name = tools.read_single_argv("--name")
         if name is not None:
             self.name = name
         print("name is : %s"%self.name )
@@ -153,8 +153,9 @@ class Blotter():
         # -------------------------------
         # work default values
         # -------------------------------
+        self.market = tools.read_single_argv("--market")
         if zmqtopic is None:
-            zmqtopic = "_qtpylib_" + str(self.name.lower()) + "_"
+            zmqtopic = "_qtpylib_" + str(self.market.lower()) + "_"
         print("zmqtopic is : %s"%zmqtopic)
         # if no path given for symbols' csv, use same dir
         if symbols == "symbols.csv":
@@ -189,12 +190,13 @@ class Blotter():
         self.cash_ticks = cash_ticks  # outside cache
         self.rtvolume = set()  # has RTVOLUME?
 
-
-        # override args with any (non-default) command-line args
         self.args = {arg: val for arg, val in locals().items(
         ) if arg not in ('__class__', 'self', 'kwargs')}
         self.args.update(kwargs)
-        self.args.update(self.load_cli_args())
+
+        if 'blotter' in sys.argv[0]:
+            # override args with any (non-default) command-line args
+            self.args.update(self.load_cli_args())
 
 
 
@@ -389,14 +391,18 @@ class Blotter():
 
 
         elif caller == "handleHistoricalData":
-            if hasattr(msg, 'reqId'):
+            if msg and hasattr(msg, 'reqId'):
+                if msg.reqId :
 
-                symbol = self.ibConn.tickerSymbol(msg.reqId)
-                if symbol not in [contract[0] for contract in self.contracts]:
-                    print("symbol %s is not followed in the list :"%symbol)
-                    print([contract[0] for contract in self.contracts])
+                    symbol = self.ibConn.tickerSymbol(msg.reqId)
+                    if symbol not in [contract[0] for contract in self.contracts]:
+                        print("symbol %s is not followed in the list :"%symbol)
+                        print([contract[0] for contract in self.contracts])
 
+                        return
+                else:
                     return
+
 
             self.on_ohlc_received(msg, kwargs)
 
@@ -492,25 +498,32 @@ class Blotter():
         symbol = self.ibConn.tickerSymbol(msg.reqId)
 
         if kwargs["completed"]:
+            print('Completed : msg = %s'%msg)
             self.backfilled  = True
             self.backfilled_symbols.append(symbol)
             tickers = set(
                 {v: k for k, v in self.ibConn.tickerIds.items() if v.upper() != "SYMBOL"}.keys())
             if tickers == set(self.backfilled_symbols):
                 self.backfilled = True
-                print(".")
 
             try:
                 self.ibConn.cancelHistoricalData(
                     self.ibConn.contracts[msg.reqId])
             except Exception as e:
+                print(e)
                 pass
 
         else:
-            timestamp =datetime.fromtimestamp(
-                int(msg.date)).replace(
-                tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                timestamp = datetime.strptime(
+                    msg.date, "%Y%m%d").strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
 
+                timestamp = datetime.fromtimestamp(
+                    int(msg.date)).replace(
+                    tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+
+            print(timestamp)
             data = {
                 "symbol": symbol,
                 "symbol_group": tools.gen_symbol_group(symbol),
@@ -1015,6 +1028,13 @@ class Blotter():
         if self.threads > 0:
             dbcurr.close()
             dbconn.close()
+    # ---------------------------------------
+    def initiate_socket(self):
+
+        self.context = zmq.Context(zmq.REP)
+        self.socket = self.context.socket(zmq.PUB)
+        print("PUB to port %s"%self.args['zmqport'])
+        self.socket.bind("tcp://*:" + str(self.args['zmqport']))
 
     # -------------------------------------------
     def run(self):
@@ -1029,9 +1049,7 @@ class Blotter():
         # connect to mysql
         self.mysql_connect()
 
-        self.context = zmq.Context(zmq.REP)
-        self.socket = self.context.socket(zmq.PUB)
-        self.socket.bind("tcp://*:" + str(self.args['zmqport']))
+        self.initiate_socket()
 
         db_modified = 0
         contracts = []
@@ -1194,20 +1212,27 @@ class Blotter():
 
     # -------------------------------------------
     def stream(self, symbols, tick_handler=None, bar_handler=None,
-               quote_handler=None, book_handler=None,contract_restriction=True):
+               quote_handler=None, book_handler=None,
+               tunnel_handler=None, strategy_handler=None,overshoot_handler=None,
+               contract_restriction=True, zmqport_list=[]):
         # load runtime/default data
         if isinstance(symbols, str):
             symbols = symbols.split(',')
         symbols = list(map(str.strip, symbols))
-
+        print("We follow those symbols %s" %symbols)
         # connect to zeromq self.socket
         self.context = zmq.Context()
         sock = self.context.socket(zmq.SUB)
         sock.setsockopt_string(zmq.SUBSCRIBE, "")
-        sock.connect('tcp://127.0.0.1:' + str(self.args['zmqport']))
+        if len(zmqport_list) == 0:
+            zmqport_list = [self.args['zmqport']] # connect to blotter by default
+        for zmqport in zmqport_list:
+            print('listen port %s'% zmqport)
+            sock.connect('tcp://127.0.0.1:' + str(zmqport))
 
         try:
             while True:
+
                 message = sock.recv_string()
                 #print("message is %s"%message)
                 if self.args["zmqtopic"] in message:
@@ -1215,6 +1240,7 @@ class Blotter():
                     data = json.loads(message)
                     # TODO : There is a lot of quote!!
                     if contract_restriction and data['symbol'] not in symbols:
+                        print("%s not in list" %data['symbol'])
                         continue
 
                     # convert None to np.nan !!
@@ -1227,12 +1253,12 @@ class Blotter():
                             book_handler(data)
                             continue
                     # quote
-                    if data['kind'] == "QUOTE":
+                    elif data['kind'] == "QUOTE":
                         if quote_handler is not None:
                             quote_handler(data)
                             continue
 
-                    if data['kind'] == "TICK":
+                    elif data['kind'] == "TICK":
                         if tick_handler is not None:
                             tick_handler(data)
                             continue
@@ -1241,6 +1267,15 @@ class Blotter():
                             bar_handler(data)
                             continue
 
+                    elif data['kind'] == "TUNNEL":
+                        if tunnel_handler is not None:
+                            tunnel_handler(data)
+                            continue
+
+                    elif data['kind'] == "OVERSHOOT":
+                        if tunnel_handler is not None:
+                            overshoot_handler(data)
+                            continue
         except (KeyboardInterrupt, SystemExit):
             print(
                 "\n\n>>> Interrupted with Ctrl-c...\n(waiting for running tasks to be completed)\n")
@@ -1289,10 +1324,6 @@ class Blotter():
 
         data.sort_index(inplace=True)
 
-        # currenly only supporting minute-data
-        if resolution[-1] in ("K", "V"):
-            self.backfilled = True
-            return None
 
         # missing history?
         start_date = parse_date(start)
@@ -1305,22 +1336,34 @@ class Blotter():
             first_date = tools.datetime64_to_datetime(data.index.values[0])
             last_date = tools.datetime64_to_datetime(data.index.values[-1])
 
+
         ib_lookback = None
         if start_date < first_date:
             ib_lookback = tools.ib_duration_str(start_date)
-        elif end_date > last_date:
-            ib_lookback = tools.ib_duration_str(last_date)
+        #elif end_date > last_date:
+        #    ib_lookback = tools.ib_duration_str(last_date)
 
         if not ib_lookback:
             self.backfilled = True
             return None
 
-        self.backfill_resolution = "1 hour" if resolution[-1] not in (
-            "K", "V", "S") else "5 min"
+
+        if 'H' in resolution:
+            self.backfill_resolution = '1 hour'
+            self.granularity = 'hour'
+        elif 'W' in resolution:
+            self.backfill_resolution = '1 week'
+            self.granularity = 'week'
+        elif 'D' in resolution:
+            self.backfill_resolution = '1 day'
+            self.granularity = 'day'
+        elif 'T' in resolution :
+            self.backfill_resolution = '5 mins'
+            self.granularity = 'min'
+
         self.log_blotter.warning("Backfilling historical data from IB...")
-        self.granularity = "hour" if resolution[-1] not in (
-            "K", "V", "S") else "min"
-        # request parameters
+
+            # request parameters
         params = {
             "lookback": ib_lookback,
             "resolution": self.backfill_resolution,

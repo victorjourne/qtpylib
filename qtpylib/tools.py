@@ -25,7 +25,8 @@ import os
 import sys
 from stat import S_IWRITE
 from math import ceil
-
+import pickle
+import json
 # from decimal import *
 import decimal
 
@@ -57,8 +58,59 @@ class make_object:
     def __init__(self, **entries):
         self.__dict__.update(entries)
 
+
+# ---------------------------------------------
+def load_model(model_path):
+    print('Load model from %s'%model_path)
+    loaded_model = pickle.load(open(model_path, "rb"))
+    return loaded_model
+
 # ---------------------------------------------
 
+class MyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            try:
+                return pd.to_datetime(o, unit='ms').strftime(
+                    ibDataTypes["DATE_TIME_FORMAT_LONG"])
+            except Exception as e:
+                return int(o)
+
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        else:
+            return super(MyEncoder, self).default(obj)
+
+
+class NumpyEncoder(json.JSONEncoder):
+    """ Special json encoder for numpy types """
+    def default(self, obj):
+        if isinstance(obj, (np.int_, np.intc, np.intp, np.int8,
+            np.int16, np.int32, np.int64, np.uint8,
+            np.uint16, np.uint32, np.uint64)):
+            return int(obj)
+        elif isinstance(obj, (np.float_, np.float16, np.float32,
+            np.float64)):
+            return float(obj)
+        elif isinstance(obj,(np.ndarray,)): #### This is the fix
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+
+# ---------------------------------------------
+def timing(f):
+    def wrap(*args):
+        time1 = time.time()
+        ret = f(*args)
+
+        time2 = time.time()
+
+        print('{:s} function took {:.3f} ms to execute'.format(f.__name__, (time2-time1)*1000.0))
+
+        return ret
+    return wrap
+# ---------------------------------------------
 
 def read_single_argv(param, default=None):
     args = " ".join(sys.argv).strip().split(param)
@@ -401,7 +453,7 @@ def backdate(res, date=None, as_datetime=False, fmt='%Y-%m-%d'):
             new_date = date - datetime.timedelta(hours=periods)
         elif "W" in res:
             new_date = date - datetime.timedelta(weeks=periods)
-        else:  # days
+        elif "D" in res:  # days
             new_date = date - datetime.timedelta(days=periods)
 
         # not a week day:
