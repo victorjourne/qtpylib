@@ -922,6 +922,10 @@ class Blotter():
 
                 #contract_open +=  [contract]
 
+            # cron signal to ping all stacked service
+            if granularity == "min":
+                self.broadcast({'kind' : 'CRON', 'name' : self.name}, "CRON")
+
             """
             if granularity == "min" and len(contract_open)>0:
                 ### Send syncrone trigger for all contracts
@@ -1214,6 +1218,7 @@ class Blotter():
     def stream(self, symbols, tick_handler=None, bar_handler=None,
                quote_handler=None, book_handler=None,
                tunnel_handler=None, strategy_handler=None,overshoot_handler=None,
+               cron_handler=None,
                contract_restriction=True, zmqport_list=[]):
         # load runtime/default data
         if isinstance(symbols, str):
@@ -1238,6 +1243,12 @@ class Blotter():
                 if self.args["zmqtopic"] in message:
                     message = message.split(self.args["zmqtopic"])[1].strip()
                     data = json.loads(message)
+
+                    if data['kind'] == "CRON":
+                        if cron_handler is not None:
+                            cron_handler(data)
+                            continue
+
                     # TODO : There is a lot of quote!!
                     if contract_restriction and data['symbol'] not in symbols:
                         print("%s not in list" %data['symbol'])
@@ -1276,6 +1287,8 @@ class Blotter():
                         if tunnel_handler is not None:
                             overshoot_handler(data)
                             continue
+
+
         except (KeyboardInterrupt, SystemExit):
             print(
                 "\n\n>>> Interrupted with Ctrl-c...\n(waiting for running tasks to be completed)\n")

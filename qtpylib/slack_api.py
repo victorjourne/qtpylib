@@ -22,6 +22,7 @@ from slack import WebClient
 
 import sys, os
 import configparser
+from qtpylib import tools
 
 # =============================================
 # check min, python version
@@ -33,9 +34,26 @@ if sys.version_info < (3, 4):
 # sms service / credentials
 # ---------------------------------------------
 
-SLACK_API_TOKEN = "xoxb-912981400480-912922149684-vIGCuatx47PyJAT9BS6Wo3MZ"
+market = tools.read_single_argv("--market")
+market = str(market) if type(market) is str else 'test'
+print(market)
+if market == 'test':
+    # test
+    SLACK_API_TOKEN = "xoxb-912981400480-924004350401-OQgJ4cBmOd4Xr09XBu0nJL8A"
+elif market == 'nasdaq':
+    # nasdaq
+    SLACK_API_TOKEN = "xoxb-912981400480-912922149684-1QrzyHFC2Z7nlrRTtIQQjhjb"
+elif market == 'sbf':
+    # nasdaq  : to be change
+    SLACK_API_TOKEN = "xoxb-912981400480-922883014067-fgzAASgkdlPl442hnwr4aetD"
+
 client = WebClient(token=SLACK_API_TOKEN)
 # ---------------------------------------------
+
+def join_channel(channel):
+    print(channel)
+    client.channels_join(name=channel)
+
 
 def send_text(msg, channel):
 

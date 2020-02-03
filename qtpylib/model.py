@@ -97,6 +97,8 @@ class Model(Broker):
             List of numbers to text orders (default: None)
         slack: bool
             Whether to send slack message  (default: False)
+        channel: str
+            Channel name to post (default: random)
         log: str
             Path to store event data (default: None)
         backtest: bool
@@ -121,7 +123,7 @@ class Model(Broker):
 
     def __init__(self, instruments=None, resolution="1H",
                  tick_window=1, bar_window=150, preload=None,
-                 blotter=None, sms=None, slack=False, log=None,
+                 blotter=None, sms=None, slack=False, channel='random', log=None,
                  backtest=False, start=None, end=None, data=None, output=None,
                  ibclient=998, ibport=4001, ibserver=None,freshstart=0,
                  zmqport=None, zmqtopic=None,market=None,appurl='',
@@ -235,6 +237,18 @@ class Model(Broker):
 
         self.symbol_ids = {symbol : get_symbol_id(symbol, self.dbconn, self.dbcurr) for symbol in self.symbols}
 
+        # ---------------------------------------
+        # Slack managment
+        self.slack = self.args['slack']
+        if self.slack :
+            if 'channel' in self.args :
+                self.channel = self.args['channel']
+            else:
+                self.channel = 'random'
+                print("Post to channel %s"%self.channel)
+            slack_api.join_channel(self.channel)
+            slack_api.send_text("Run %s"%self.name, self.channel)
+
     # ---------------------------------------
     def load_cli_args(self):
         """
@@ -251,6 +265,8 @@ class Model(Broker):
                             help='Numbers to text orders', nargs='+')
         parser.add_argument('--slack', default=self.args["slack"],action='store_true',
                             help='Send to slack')
+        parser.add_argument('--channel', default=self.args["channel"],
+                                help='Channel name', required=False)
         parser.add_argument('--log', default=self.args["log"],
                             help='Path to store trade data')
         parser.add_argument('--start', default=self.args["start"],
@@ -375,21 +391,26 @@ class Model(Broker):
             self._bar_handler({"symbol":symbol, "type" : "BAR", 'timestamp':"2020-01-13 15:00:00"})
         """
 
-        zmqport_list = range(int(self.blotter.args['zmqport']),int(self.args['zmqport']))
-        print(zmqport_list)
+        self.zmqport_list = range(int(self.blotter.args['zmqport']),int(self.args['zmqport']))
+        print(self.zmqport_list)
         self.blotter.stream(
             symbols=self.symbols,
             tick_handler=self._tick_handler,
             bar_handler=self._bar_handler,
             tunnel_handler=self._tunnel_handler,
             overshoot_handler = self._overshoot_handler,
+            cron_handler = self._cron_handler,
             contract_restriction=True,
-            zmqport_list = zmqport_list
+            zmqport_list = self.zmqport_list
         )
 
     @asynctools.multitasking.task
     def _tick_handler(self, tick, stale_tick=False):
         self.on_tick(tick)
+
+    @asynctools.multitasking.task
+    def _cron_handler(self, data):
+        self.on_cron(data)
 
     @asynctools.multitasking.task
     def _bar_handler(self, data):
@@ -421,7 +442,10 @@ class Model(Broker):
     def on_tunnel_out(self):
         raise NotImplementedError("Should implement on_tunnel_out()")
         pass
-
+    # ---------------------------------------
+    def on_cron(self, data):
+        # Check if all listening Zmq adress are sending cron
+        pass
     # --------------------------------------
 
     def _base_bar_handler(self, data):
@@ -764,8 +788,8 @@ class Model(Broker):
             pass
 
     # ---------------------------------------
-    def slack(self, text, channel):
-        """Sends an SMS message.
+    def post(self, text, channel=None):
+        """Sends an slack message.
         Slack section of the documentation for more information about this)
 
 
@@ -774,5 +798,6 @@ class Model(Broker):
                 The body of the Slack message to send
 
         """
-        logging.info("Slack: %s", str(text))
-        slack_api.send_text(text, channel)
+        if self.slack:
+            logging.info("Slack: %s", str(text))
+            slack_api.send_text(text, channel)
