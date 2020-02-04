@@ -39,13 +39,13 @@ market = str(market) if type(market) is str else 'test'
 print(market)
 if market == 'test':
     # test
-    SLACK_API_TOKEN = "xoxb-912981400480-924004350401-OQgJ4cBmOd4Xr09XBu0nJL8A"
+    SLACK_API_TOKEN = "xoxb-912981400480-924004350401-DYPfbLbcfgju9s5uXRdZGpCi"
 elif market == 'nasdaq':
     # nasdaq
-    SLACK_API_TOKEN = "xoxb-912981400480-912922149684-1QrzyHFC2Z7nlrRTtIQQjhjb"
+    SLACK_API_TOKEN = "xoxb-912981400480-912922149684-EkKtHCd8iIfQBdf9x4ex5gfy"
 elif market == 'sbf':
     # nasdaq  : to be change
-    SLACK_API_TOKEN = "xoxb-912981400480-922883014067-fgzAASgkdlPl442hnwr4aetD"
+    SLACK_API_TOKEN = "xoxb-912981400480-922883014067-CDBX9qVyyBIoTiFUCXUJnwkD"
 
 client = WebClient(token=SLACK_API_TOKEN)
 # ---------------------------------------------

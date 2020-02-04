@@ -247,7 +247,7 @@ class Model(Broker):
                 self.channel = 'random'
                 print("Post to channel %s"%self.channel)
             slack_api.join_channel(self.channel)
-            slack_api.send_text("Run %s"%self.name, self.channel)
+            #slack_api.send_text("Run %s"%self.name, self.channel)
 
     # ---------------------------------------
     def load_cli_args(self):
@@ -657,6 +657,107 @@ class Model(Broker):
         """
         self.signals[symbol][-1] = signal
 
+    # ---------------------------------------
+    # shortcuts to broker._create_order
+    # ---------------------------------------
+    def order(self, signal, symbol, quantity=0, **kwargs):
+        """ Send an order for the selected instrument
+
+        :Parameters:
+
+            direction : string
+                Order Type (BUY/SELL, EXIT/FLATTEN)
+            symbol : string
+                instrument symbol
+            quantity : int
+                Order quantiry
+
+        :Optional:
+
+            limit_price : float
+                In case of a LIMIT order, this is the LIMIT PRICE
+            expiry : int
+                Cancel this order if not filled after *n* seconds
+                (default 60 seconds)
+            order_type : string
+                Type of order: Market (default),
+                LIMIT (default when limit_price is passed),
+                MODIFY (required passing or orderId)
+            orderId : int
+                If modifying an order, the order id of the modified order
+            target : float
+                Target (exit) price
+            initial_stop : float
+                Price to set hard stop
+            stop_limit: bool
+                Flag to indicate if the stop should be STOP or STOP LIMIT.
+                Default is ``False`` (STOP)
+            trail_stop_at : float
+                Price at which to start trailing the stop
+            trail_stop_type : string
+                Type of traiing stop offset (amount, percent).
+                Default is ``percent``
+            trail_stop_by : float
+                Offset of trailing stop distance from current price
+            fillorkill: bool
+                Fill entire quantiry or none at all
+            iceberg: bool
+                Is this an iceberg (hidden) order
+            tif: str
+                Time in force (DAY, GTC, IOC, GTD). default is ``DAY``
+        """
+        self.log_algo.debug('ORDER: %s %4d %s %s', signal,
+                            quantity, symbol, kwargs)
+        if signal.upper() == "EXIT" or signal.upper() == "FLATTEN":
+            position = self.get_positions(symbol)
+            if position['position'] == 0:
+                return
+
+            kwargs['symbol'] = symbol
+            kwargs['quantity'] = abs(position['position'])
+            kwargs['direction'] = "BUY" if position['position'] < 0 else "SELL"
+
+            # print("EXIT", kwargs)
+
+            try:
+                self.record({symbol+'_POSITION': 0})
+            except Exception as e:
+                pass
+
+            if not self.backtest:
+                self._create_order(**kwargs)
+
+        else:
+            if quantity == 0:
+                return
+
+            kwargs['symbol'] = symbol
+            kwargs['quantity'] = abs(quantity)
+            kwargs['direction'] = signal.upper()
+
+            # print(signal.upper(), kwargs)
+
+            # record
+            try:
+                quantity = abs(quantity)
+                if kwargs['direction'] != "BUY":
+                    quantity = -quantity
+                self.record({symbol+'_POSITION': quantity})
+            except Exception as e:
+                pass
+
+            if not self.backtest:
+                self._create_order(**kwargs)
+
+    # ---------------------------------------
+    def cancel_order(self, orderId):
+        """ Cancels a un-filled order
+
+        Parameters:
+            orderId : int
+                Order ID
+        """
+        self._cancel_order(orderId)
 
     # ---------------------------------------
     # UTILITY FUNCTIONS
