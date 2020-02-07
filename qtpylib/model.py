@@ -123,7 +123,7 @@ class Model(Broker):
 
     def __init__(self, instruments=None, resolution="1H",
                  tick_window=1, bar_window=150, preload=None,
-                 blotter=None, sms=None, slack=False, channel='random', log=None,
+                 blotter=None, sms=None, slack=False, channel='random', token='', log=None,
                  backtest=False, start=None, end=None, data=None, output=None,
                  ibclient=998, ibport=4001, ibserver=None,freshstart=0,
                  zmqport=None, zmqtopic=None,market=None,appurl='',
@@ -208,9 +208,9 @@ class Model(Broker):
         print("symbols are : %s"%self.symbols  )
         # -----------------------------------
         # tunnel threshold
-        self.tunnel_threshold = {}
+        self.dic_info = {}
         for sym in self.symbols:
-            self.tunnel_threshold[sym] = {}
+            self.dic_info[sym] = {}
         # -----------------------------------
         # signal collector
 
@@ -241,13 +241,15 @@ class Model(Broker):
         # Slack managment
         self.slack = self.args['slack']
         if self.slack :
+
             if 'channel' in self.args :
                 self.channel = self.args['channel']
             else:
                 self.channel = 'random'
-                print("Post to channel %s"%self.channel)
-            slack_api.join_channel(self.channel)
-            #slack_api.send_text("Run %s"%self.name, self.channel)
+            print("Post to channel %s"%self.channel)
+            self.slack_bot = slack_api.SlackBot(self.args['token'])
+            self.slack_bot.join_channel(self.channel)
+            self.slack_bot.send_text("Restart %s"%self.name, self.channel)
 
     # ---------------------------------------
     def load_cli_args(self):
@@ -267,6 +269,8 @@ class Model(Broker):
                             help='Send to slack')
         parser.add_argument('--channel', default=self.args["channel"],
                                 help='Channel name', required=False)
+        parser.add_argument('--token', default=self.args["token"],
+                                help='Private token of slack app', required=False)
         parser.add_argument('--log', default=self.args["log"],
                             help='Path to store trade data')
         parser.add_argument('--start', default=self.args["start"],
@@ -319,7 +323,7 @@ class Model(Broker):
 
         if symbol not in self.symbol_ids:
             print('Contrat %s not in self.symbol_ids'%symbol)
-            self.tunnel_threshold[symbol] = {}
+            self.dic_info[symbol] = {}
             return
 
         bars = pd.read_sql(req%(granularity, self.symbol_ids[symbol], window), dbconn)
@@ -410,7 +414,8 @@ class Model(Broker):
 
     @asynctools.multitasking.task
     def _cron_handler(self, data):
-        self.on_cron(data)
+        print(data)
+        #self.on_cron(data)
 
     @asynctools.multitasking.task
     def _bar_handler(self, data):
@@ -725,7 +730,7 @@ class Model(Broker):
                 pass
 
             if not self.backtest:
-                self._create_order(**kwargs)
+                orderId = self._create_order(**kwargs)
 
         else:
             if quantity == 0:
@@ -747,8 +752,8 @@ class Model(Broker):
                 pass
 
             if not self.backtest:
-                self._create_order(**kwargs)
-
+                orderId = self._create_order(**kwargs)
+        return orderId
     # ---------------------------------------
     def cancel_order(self, orderId):
         """ Cancels a un-filled order
@@ -901,4 +906,4 @@ class Model(Broker):
         """
         if self.slack:
             logging.info("Slack: %s", str(text))
-            slack_api.send_text(text, channel)
+            self.slack_bot.send_text(text, channel)

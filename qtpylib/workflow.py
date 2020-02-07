@@ -33,7 +33,7 @@ from ezibpy import ezIBpy
 from ezibpy.utils import contract_expiry_from_symbol
 
 from qtpylib import tools
-from qtpylib.blotter import (
+from qtpylib.blotter_5min import (
     load_blotter_args, get_symbol_id,
     mysql_insert_tick, mysql_insert_bar
 )

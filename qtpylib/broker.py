@@ -131,12 +131,17 @@ class Broker():
 
         # -----------------------------------
         # load blotter settings
+
         self.blotter_args = load_blotter_args(
             self.blotter_name, logger=self.log_broker)
+
+
         #print('Blotter args : ')
         #print(self.blotter_args)
         self.blotter = Blotter(**self.blotter_args)
+
         #print('Blotter args after instanciation: ')
+        #print(self.blotter.args)
 
         # -----------------------------------
         # create contracts
@@ -297,12 +302,18 @@ class Broker():
             self.log_broker.info("Connection established...")
 
         elif caller == "handleOrders":
+
             if not hasattr(self, "orders"):
                 return
 
             if msg.typeName == ezibpy.utils.dataTypes["MSG_TYPE_OPEN_ORDER_END"]:
                 return
 
+            if msg.typeName == ezibpy.utils.dataTypes["MSG_TYPE_EXEC_DETAILS"]:
+                print('History order request')
+                print(msg.execution.__dict__)
+                #import pdb; pdb.set_trace()
+                return
             # order canceled? do some cleanup
             if hasattr(msg, 'status') and "CANCELLED" in msg.status.upper():
                 if msg.orderId in self.orders.recent.keys():
@@ -588,7 +599,7 @@ class Broker():
 
     # ---------------------------------------
     def _create_order(self, symbol, direction, quantity, order_type="",
-                      limit_price=0, expiry=0, orderId=0, target=0,
+                      limit_price=0,stop_price=0, expiry=0, orderId=0, target=0,target2=0,
                       initial_stop=0, trail_stop_at=0, trail_stop_by=0,
                       stop_limit=False, trail_stop_type='percent', **kwargs):
 
@@ -596,6 +607,8 @@ class Broker():
         ticksize = self.get_contract_details(symbol)['m_minTick']
         limit_price = tools.round_to_fraction(limit_price, ticksize)
         target = tools.round_to_fraction(target, ticksize)
+        target2 = tools.round_to_fraction(target2, ticksize)
+
         initial_stop = tools.round_to_fraction(initial_stop, ticksize)
         trail_stop_at = tools.round_to_fraction(trail_stop_at, ticksize)
         trail_stop_by = tools.round_to_fraction(trail_stop_by, ticksize)
@@ -617,7 +630,8 @@ class Broker():
         if "stoploss" in kwargs and initial_stop == 0:
             initial_stop = kwargs['stoploss']
 
-        order_type = "MARKET" if limit_price == 0 else "LIMIT"
+
+        #order_type = "MARKET" if limit_price == 0 else "LIMIT"
         fillorkill = kwargs["fillorkill"] if "fillorkill" in kwargs else False
         iceberg = kwargs["iceberg"] if "iceberg" in kwargs else False
         tif = kwargs["tif"] if "tif" in kwargs else "DAY"
@@ -625,13 +639,14 @@ class Broker():
         # clear expired pending orders
         self._cancel_expired_pending_orders()
 
+        """
         # don't submit order if a pending one is waiting
         if symbol in self.orders.pending:
             self.log_broker.warning(
                 'Not submitting %s order, orders pending: %s', symbol,
                 self.orders.pending)
             return
-
+        """
         # continue...
         order_quantity = abs(quantity)
         if direction.upper() == "SELL":
@@ -640,21 +655,39 @@ class Broker():
         contract = self.get_contract(symbol)
 
         # is bracket order
-        bracket = (target > 0) | (initial_stop > 0) | (
-            trail_stop_at > 0) | (trail_stop_by > 0)
+        bracket = ((target > 0) | (initial_stop > 0) | (
+            trail_stop_at > 0) | (trail_stop_by > 0)) & (target2==0)
+
+        # is custom
+        custom = (target > 0) | (target2 > 0) | (initial_stop > 0)
+
+        if limit_price > 0:
+            order_type = 'LIMIT'
+        elif stop_price > 0:
+            order_type = 'STOP'
+        else:
+            order_type = 'MARKET'
+        print(order_type)
 
         # create & submit order
-        if not bracket:
+        if (not bracket) and (not custom):
             # simple order
-            order = self.ibConn.createOrder(order_quantity, limit_price,
-                                            fillorkill=fillorkill,
-                                            iceberg=iceberg,
-                                            tif=tif)
+            if order_type == 'STOP':
+                order = self.ibConn.createStopOrder(order_quantity, stop=stop_price,
+                                                tif=tif)
+
+            else:
+                order = self.ibConn.createOrder(order_quantity, limit_price,
+                                                fillorkill=fillorkill,
+                                                iceberg=iceberg,
+                                                tif=tif)
 
             orderId = self.ibConn.placeOrder(contract, order)
             self.log_broker.debug('PLACE ORDER: %s %s', tools.contract_to_dict(
                 contract), tools.order_to_dict(order))
-        else:
+            print('PLACE ORDER: %s %s', tools.contract_to_dict(
+                contract), tools.order_to_dict(order))
+        elif bracket:
             # bracket order
             order = self.ibConn.createBracketOrder(contract, order_quantity,
                                                    entry=limit_price,
@@ -698,6 +731,61 @@ class Broker():
                                        quantity=-order_quantity,
                                        order_type='STOP',
                                        parentId=order["entryOrderId"])
+        elif custom:
+            # bracket order
+            assert abs(stop_price) < abs(target2)
+            assert abs(target2) < abs(target)
+
+            order = self.ibConn.createCustomOrder(contract, order_quantity,
+                                                   entry=limit_price,
+                                                   target=target,
+                                                   target2=target2,
+                                                   stop=initial_stop,
+                                                   stop_limit=stop_limit,
+                                                   fillorkill=fillorkill,
+                                                   iceberg=iceberg,
+                                                   tif=tif)
+            orderId = order["entryOrderId"]
+
+            # triggered trailing stop?
+            if trail_stop_by != 0 and trail_stop_at != 0:
+                trail_stop_params = {
+                    "symbol": symbol,
+                    "quantity": -order_quantity,
+                    "triggerPrice": trail_stop_at,
+                    "parentId": order["entryOrderId"],
+                    "stopOrderId": order["stopOrderId"]
+                }
+                if trail_stop_type.lower() == 'amount':
+                    trail_stop_params["trailAmount"] = trail_stop_by
+                else:
+                    trail_stop_params["trailPercent"] = trail_stop_by
+                self.ibConn.createTriggerableTrailingStop(**trail_stop_params)
+
+            # add all orders to history
+            self._update_order_history(symbol=symbol,
+                                       orderId=order["entryOrderId"],
+                                       quantity=order_quantity,
+                                       order_type='ENTRY')
+
+            self._update_order_history(symbol=symbol,
+                                       orderId=order["targetOrderId"],
+                                       quantity=-1,
+                                       order_type='TARGET',
+                                       parentId=order["entryOrderId"])
+
+            self._update_order_history(symbol=symbol,
+                                       orderId=order["target2OrderId"],
+                                       quantity=1,
+                                       order_type='TARGET',
+                                       parentId=order["entryOrderId"])
+
+            self._update_order_history(symbol=symbol,
+                                       orderId=order["stopOrderId"],
+                                       quantity=-order_quantity,
+                                       order_type='STOP',
+                                       parentId=order["entryOrderId"])
+
 
         # have original params available for FILL event
         self.orders.recent[orderId] = self._get_locals(locals())
@@ -718,6 +806,7 @@ class Broker():
         expiry = expiry * 1000 if expiry > 0 else 60000  # 1min
         self._update_pending_order(symbol, orderId, expiry, order_quantity)
         time.sleep(0.1)
+        return orderId
 
     # ---------------------------------------
     def _cancel_order(self, orderId):

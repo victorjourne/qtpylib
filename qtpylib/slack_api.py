@@ -31,35 +31,21 @@ if sys.version_info < (3, 4):
 # =============================================
 
 # ---------------------------------------------
-# sms service / credentials
-# ---------------------------------------------
 
-market = tools.read_single_argv("--market")
-market = str(market) if type(market) is str else 'test'
-print(market)
-if market == 'test':
-    # test
-    SLACK_API_TOKEN = "xoxb-912981400480-924004350401-DYPfbLbcfgju9s5uXRdZGpCi"
-elif market == 'nasdaq':
-    # nasdaq
-    SLACK_API_TOKEN = "xoxb-912981400480-912922149684-EkKtHCd8iIfQBdf9x4ex5gfy"
-elif market == 'sbf':
-    # nasdaq  : to be change
-    SLACK_API_TOKEN = "xoxb-912981400480-922883014067-CDBX9qVyyBIoTiFUCXUJnwkD"
+class SlackBot(object):
+    """Slackbot"""
 
-client = WebClient(token=SLACK_API_TOKEN)
-# ---------------------------------------------
+    def __init__(self, token):
+        self.client = WebClient(token=token)
 
-def join_channel(channel):
-    print(channel)
-    client.channels_join(name=channel)
+    def join_channel(self, channel):
+        self.client.channels_join(name=channel)
 
+    def send_text(self, msg, channel):
+        response = self.client.chat_postMessage(
+                                channel=channel,
+                                text=msg)
 
-def send_text(msg, channel):
-
-    response = client.chat_postMessage(
-        channel=channel,
-        text=msg)
 
 # ---------------------------------------------
 
