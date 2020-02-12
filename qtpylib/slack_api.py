@@ -45,7 +45,13 @@ class SlackBot(object):
         response = self.client.chat_postMessage(
                                 channel=channel,
                                 text=msg)
+        return response
 
+    def update_text(self, msg, channel, ts):
+        response = self.client.chat_update(
+                                channel=channel,
+                                text=msg,ts=ts)
+        return response
 
 # ---------------------------------------------
 
