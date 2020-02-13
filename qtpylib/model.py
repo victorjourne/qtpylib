@@ -144,13 +144,21 @@ class Model(Broker):
             zmqtopic = "_qtpylib_" + str(self.market.lower()) + "_"
         print("zmqtopic is : %s"%zmqtopic)
 
+
         # initilize algo logger
         self.log_algo = logging.getLogger(__name__)
-
         # initilize strategy logger
         tools.createLogger(self.name, level=logging.INFO)
         self.log = logging.getLogger(self.name)
-
+        """
+        self.log_algo = logging.getLogger(__name__)
+        handler = logging.FileHandler("error.log")
+        handler.setLevel(logging.INFO)
+        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        handler.setFormatter(formatter)
+        self.log_algo.addHandler(handler)
+        self.log_algo.debug('Coucou')
+        """
         # override args with any (non-default) command-line args
         self.args = {arg: val for arg, val in locals().items(
         ) if arg not in ('__class__', 'self', 'kwargs')}
@@ -250,7 +258,10 @@ class Model(Broker):
             self.slack_bot = slack_api.SlackBot(self.args['token'])
             self.slack_bot.join_channel(self.channel)
             self.slack_bot.send_text("Restart %s"%self.name, self.channel)
-
+            # for update cron msg
+            self.update_msg_cron_key = {}
+            for sym in self.symbols:
+                self.update_msg_cron_key[sym] = {"channel" : 'debug'}
     # ---------------------------------------
     def load_cli_args(self):
         """
@@ -315,7 +326,7 @@ class Model(Broker):
 
     def get_history(self, symbol, granularity, window):
         req = """SELECT datetime, open, high, close, low, volume, symbol_id FROM bars_%s WHERE symbol_id=%s ORDER BY datetime DESC LIMIT %s"""
-
+        self.threads = 1
         if self.threads > 0:
             dbconn = self.get_mysql_connection()
         else:
@@ -415,7 +426,16 @@ class Model(Broker):
     @asynctools.multitasking.task
     def _cron_handler(self, data):
         print(data)
-        #self.on_cron(data)
+        for sym, dic in self.dic_info.items() :
+            if len(dic) > 0:
+                response = self.post("*[%s]*"%sym + str(dic), **self.update_msg_cron_key[sym])
+                if response['ok']:
+                    self.update_msg_cron_key[sym] = {"channel" : response['channel'], "ts" : response['ts']}
+                else:
+                    self.update_msg_cron_key[sym] = {"channel" : 'debug'}
+            time.sleep(1.01)
+
+        self.on_cron(data)
 
     @asynctools.multitasking.task
     def _bar_handler(self, data):
@@ -448,6 +468,7 @@ class Model(Broker):
         raise NotImplementedError("Should implement on_tunnel_out()")
         pass
     # ---------------------------------------
+    @abstractmethod
     def on_cron(self, data):
         # Check if all listening Zmq adress are sending cron
         pass
@@ -894,16 +915,28 @@ class Model(Broker):
             pass
 
     # ---------------------------------------
-    def post(self, text, channel=None):
+    def post(self, text, channel=None,ts=None):
         """Sends an slack message.
         Slack section of the documentation for more information about this)
 
 
         :Parameters:
+            ts : timestamp of the message to update
             tunnel : text
                 The body of the Slack message to send
 
         """
         if self.slack:
-            logging.info("Slack: %s", str(text))
-            self.slack_bot.send_text(text, channel)
+            try:
+                #logging.info("Slack: %s", str(text))
+                if ts is not None:
+                    response = self.slack_bot.update_text(text, channel, ts)
+                else:
+                    response = self.slack_bot.send_text(text, channel)
+
+                return response
+            except Exception as e:
+                print(e)
+                return {'ok' : False}
+            else:
+                return {'ok' : False}

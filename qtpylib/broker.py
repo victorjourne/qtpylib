@@ -139,7 +139,7 @@ class Broker():
         #print('Blotter args : ')
         #print(self.blotter_args)
         self.blotter = Blotter(**self.blotter_args)
-
+        self.lock = False
         #print('Blotter args after instanciation: ')
         #print(self.blotter.args)
 
@@ -228,10 +228,17 @@ class Broker():
 
     # ---------------------------------------
 
+
+    def _fill_handler(self, instrument, order):
+        while not self.lock:
+            self.lock = True
+            self.on_fill(instrument, order)
+            self.lock = False
+
+
     @abstractmethod
     def on_fill(self, instrument, order):
         pass
-
     # ---------------------------------------
     """
     instrument group methods
@@ -361,12 +368,12 @@ class Broker():
                 self._update_order_history(
                     symbol, orderId, quantity, filled=True)
                 self._expire_pending_order(symbol, orderId)
-                self._cancel_orphan_orders(orderId)
+                #self._cancel_orphan_orders(orderId)
                 self._register_trade(order)
 
                 # filled
                 time.sleep(0.005)
-                self.on_fill(self.get_instrument(order['symbol']), order)
+                self._fill_handler(self.get_instrument(order['symbol']), order)
 
     # ---------------------------------------
     def _register_trade(self, order):
@@ -507,7 +514,15 @@ class Broker():
             return
 
         # connection established
-        if (self.dbconn is not None) & (self.dbcurr is not None):
+        self.threads = 1
+        if self.threads > 0:
+            dbconn = self.get_mysql_connection()
+            dbcurr = dbconn.cursor()
+        else:
+            dbconn = self.dbconn
+            dbcurr = self.dbcurr
+
+        if (dbconn is not None) & (dbcurr is not None):
 
             sql = """INSERT INTO trades (
                 `algo`, `symbol`, `direction`,`quantity`,
@@ -539,7 +554,7 @@ class Broker():
                 if v is not None:
                     trade[k] = str(v)
 
-            self.dbcurr.execute(sql, (
+            dbcurr.execute(sql, (
                 trade['strategy'], trade['symbol'], trade['direction'], trade['quantity'],
                 trade['entry_time'], trade['exit_time'], trade['exit_reason'],
                 trade['order_type'], trade['market_price'], trade['target'], trade['stop'],
@@ -552,9 +567,16 @@ class Broker():
 
             # commit
             try:
-                self.dbconn.commit()
+                dbconn.commit()
             except Exception as e:
-                pass
+                print("Cannot commit")
+                print(e)
+
+
+            # disconect from mysql
+            if self.threads > 0:
+                dbcurr.close()
+                dbconn.close()
 
         if self.trade_log_dir:
             self.trade_log_dir = (self.trade_log_dir + '/').replace('//', '/')
@@ -636,17 +658,8 @@ class Broker():
         iceberg = kwargs["iceberg"] if "iceberg" in kwargs else False
         tif = kwargs["tif"] if "tif" in kwargs else "DAY"
 
-        # clear expired pending orders
-        self._cancel_expired_pending_orders()
 
-        """
-        # don't submit order if a pending one is waiting
-        if symbol in self.orders.pending:
-            self.log_broker.warning(
-                'Not submitting %s order, orders pending: %s', symbol,
-                self.orders.pending)
-            return
-        """
+
         # continue...
         order_quantity = abs(quantity)
         if direction.upper() == "SELL":
@@ -685,123 +698,13 @@ class Broker():
             orderId = self.ibConn.placeOrder(contract, order)
             self.log_broker.debug('PLACE ORDER: %s %s', tools.contract_to_dict(
                 contract), tools.order_to_dict(order))
-            print('PLACE ORDER: %s %s', tools.contract_to_dict(
-                contract), tools.order_to_dict(order))
-        elif bracket:
-            # bracket order
-            order = self.ibConn.createBracketOrder(contract, order_quantity,
-                                                   entry=limit_price,
-                                                   target=target,
-                                                   stop=initial_stop,
-                                                   stop_limit=stop_limit,
-                                                   fillorkill=fillorkill,
-                                                   iceberg=iceberg,
-                                                   tif=tif)
-            orderId = order["entryOrderId"]
-
-            # triggered trailing stop?
-            if trail_stop_by != 0 and trail_stop_at != 0:
-                trail_stop_params = {
-                    "symbol": symbol,
-                    "quantity": -order_quantity,
-                    "triggerPrice": trail_stop_at,
-                    "parentId": order["entryOrderId"],
-                    "stopOrderId": order["stopOrderId"]
-                }
-                if trail_stop_type.lower() == 'amount':
-                    trail_stop_params["trailAmount"] = trail_stop_by
-                else:
-                    trail_stop_params["trailPercent"] = trail_stop_by
-                self.ibConn.createTriggerableTrailingStop(**trail_stop_params)
-
-            # add all orders to history
-            self._update_order_history(symbol=symbol,
-                                       orderId=order["entryOrderId"],
-                                       quantity=order_quantity,
-                                       order_type='ENTRY')
-
-            self._update_order_history(symbol=symbol,
-                                       orderId=order["targetOrderId"],
-                                       quantity=-order_quantity,
-                                       order_type='TARGET',
-                                       parentId=order["entryOrderId"])
-
-            self._update_order_history(symbol=symbol,
-                                       orderId=order["stopOrderId"],
-                                       quantity=-order_quantity,
-                                       order_type='STOP',
-                                       parentId=order["entryOrderId"])
-        elif custom:
-            # bracket order
-            assert abs(stop_price) < abs(target2)
-            assert abs(target2) < abs(target)
-
-            order = self.ibConn.createCustomOrder(contract, order_quantity,
-                                                   entry=limit_price,
-                                                   target=target,
-                                                   target2=target2,
-                                                   stop=initial_stop,
-                                                   stop_limit=stop_limit,
-                                                   fillorkill=fillorkill,
-                                                   iceberg=iceberg,
-                                                   tif=tif)
-            orderId = order["entryOrderId"]
-
-            # triggered trailing stop?
-            if trail_stop_by != 0 and trail_stop_at != 0:
-                trail_stop_params = {
-                    "symbol": symbol,
-                    "quantity": -order_quantity,
-                    "triggerPrice": trail_stop_at,
-                    "parentId": order["entryOrderId"],
-                    "stopOrderId": order["stopOrderId"]
-                }
-                if trail_stop_type.lower() == 'amount':
-                    trail_stop_params["trailAmount"] = trail_stop_by
-                else:
-                    trail_stop_params["trailPercent"] = trail_stop_by
-                self.ibConn.createTriggerableTrailingStop(**trail_stop_params)
-
-            # add all orders to history
-            self._update_order_history(symbol=symbol,
-                                       orderId=order["entryOrderId"],
-                                       quantity=order_quantity,
-                                       order_type='ENTRY')
-
-            self._update_order_history(symbol=symbol,
-                                       orderId=order["targetOrderId"],
-                                       quantity=-1,
-                                       order_type='TARGET',
-                                       parentId=order["entryOrderId"])
-
-            self._update_order_history(symbol=symbol,
-                                       orderId=order["target2OrderId"],
-                                       quantity=1,
-                                       order_type='TARGET',
-                                       parentId=order["entryOrderId"])
-
-            self._update_order_history(symbol=symbol,
-                                       orderId=order["stopOrderId"],
-                                       quantity=-order_quantity,
-                                       order_type='STOP',
-                                       parentId=order["entryOrderId"])
 
 
         # have original params available for FILL event
         self.orders.recent[orderId] = self._get_locals(locals())
         self.orders.recent[orderId]['targetOrderId'] = 0
         self.orders.recent[orderId]['stopOrderId'] = 0
-
-        if bracket:
-            self.orders.recent[orderId]['targetOrderId'] = order["targetOrderId"]
-            self.orders.recent[orderId]['stopOrderId'] = order["stopOrderId"]
-
-        # append market price at the time of order
-        try:
-            self.orders.recent[orderId]['price'] = self.last_price[symbol]
-        except Exception as e:
-            self.orders.recent[orderId]['price'] = 0
-
+        self.orders.recent[orderId]['price'] = 0
         # add orderId / ttl to (auto-adds to history)
         expiry = expiry * 1000 if expiry > 0 else 60000  # 1min
         self._update_pending_order(symbol, orderId, expiry, order_quantity)
